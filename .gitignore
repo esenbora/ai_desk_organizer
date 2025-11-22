@@ -39,7 +39,14 @@ logs/
 Thumbs.db
 
 # Project specific
+data/*.db
 data/*.db-journal
 data/*.db-wal
+!data/deskopt.db
 models/*.pt
 !models/.gitkeep
+
+# Test coverage
+htmlcov/
+.coverage
+.pytest_cache/
