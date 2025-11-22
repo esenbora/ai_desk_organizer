@@ -1,19 +1,38 @@
 import sqlite3
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import Config
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 class DatabaseManager:
-    def __init__(self, db_path="data/deskopt.db"):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path or Config.get_db_path()
         self.ensure_database_exists()
     
     def ensure_database_exists(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        if not os.path.exists(self.db_path):
-            self.initialize_database()
+        try:
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:  # Only create if there's a directory component
+                os.makedirs(db_dir, exist_ok=True)
+            if not os.path.exists(self.db_path):
+                logger.info(f"Database not found, initializing: {self.db_path}")
+                self.initialize_database()
+            else:
+                logger.info(f"Using existing database: {self.db_path}")
+        except Exception as e:
+            logger.error(f"Failed to ensure database exists: {e}", exc_info=True)
+            raise
     
     def get_connection(self):
-        return sqlite3.connect(self.db_path)
+        try:
+            return sqlite3.connect(self.db_path)
+        except sqlite3.Error as e:
+            logger.error(f"Database connection failed: {e}", exc_info=True)
+            raise
     
     def initialize_database(self):
         with self.get_connection() as conn:
@@ -168,25 +187,34 @@ class DatabaseManager:
         ]
         
         cursor.executemany('''
-            INSERT INTO ergonomic_rules 
+            INSERT INTO ergonomic_rules
             (role_slug, item_slug, min_dist_cm, max_dist_cm, ideal_angle, priority_level, advice_text)
             VALUES ('admin', ?, ?, ?, ?, ?, ?)
         ''', admin_rules)
-        
-        cursor.executemany('''
-            INSERT INTO ergonomic_rules 
-            (role_slug, item_slug, min_dist_cm, max_dist_cm, ideal_angle, priority_level, advice_text)
-            VALUES ('artist', ?, ?, ?, ?, ?, ?)
-        ''', artist_rules)
+
+        logger.info("Database seeded with initial data successfully")
     
     def create_profile(self, name, role, handedness):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT INTO profiles (name, role, handedness) VALUES (?, ?, ?)',
-                (name, role, handedness)
-            )
-            return cursor.lastrowid
+        try:
+            if not name or not name.strip():
+                raise ValueError("Profile name cannot be empty")
+            if not Config.is_valid_role(role):
+                raise ValueError(f"Invalid role: {role}. Must be one of: {', '.join(Config.VALID_ROLES)}")
+            if not Config.is_valid_handedness(handedness):
+                raise ValueError(f"Invalid handedness: {handedness}. Must be one of: {', '.join(Config.VALID_HANDEDNESS)}")
+
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'INSERT INTO profiles (name, role, handedness) VALUES (?, ?, ?)',
+                    (name.strip(), role.lower(), handedness.lower())
+                )
+                profile_id = cursor.lastrowid
+                logger.info(f"Created profile '{name}' (ID: {profile_id})")
+                return profile_id
+        except Exception as e:
+            logger.error(f"Failed to create profile: {e}", exc_info=True)
+            raise
     
     def get_profiles(self):
         with self.get_connection() as conn:
