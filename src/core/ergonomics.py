@@ -3,6 +3,7 @@ import json
 import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import Config
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -125,16 +126,23 @@ class ErgonomicEngine:
         """
         if not violations:
             return 100
-        
+
+        # Map priority to penalty using Config
+        penalty_map = {
+            1: Config.PRIORITY_1_PENALTY,
+            2: Config.PRIORITY_2_PENALTY,
+            3: Config.PRIORITY_3_PENALTY
+        }
+
         total_penalty = 0
         max_penalty = 0
-        
+
         for violation in violations:
             priority = violation['priority']
-            penalty = (4 - priority) * 20  # Priority 1 = 60 points, 2 = 40, 3 = 20
+            penalty = penalty_map.get(priority, Config.PRIORITY_3_PENALTY)
             total_penalty += penalty
-            max_penalty += 60  # Maximum possible penalty per violation
-        
+            max_penalty += Config.PRIORITY_1_PENALTY  # Maximum possible penalty per violation
+
         score = max(0, 100 - (total_penalty / max_penalty * 100))
         return round(score, 1)
     

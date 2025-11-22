@@ -2,16 +2,18 @@ import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QPushButton, QComboBox,
                             QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
-                            QTabWidget, QTextEdit, QSplitter, QFrame)
+                            QTabWidget, QTextEdit, QSplitter, QFrame, QProgressBar)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QFont, QColor, QImage
 import cv2
 import numpy as np
 
+from config import Config
 from core.database import DatabaseManager
 from core.calibration import CalibrationManager
 from ai.detector import ObjectDetector
 from core.ergonomics import ErgonomicEngine
+from gui.analysis_worker import AnalysisWorker
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -210,17 +212,22 @@ class DeskOptMainWindow(QMainWindow):
         self.calibration = CalibrationManager()
         self.detector = ObjectDetector()
         self.ergonomic_engine = ErgonomicEngine(self.db)
-        
+
         self.current_image_path = None
         self.current_profile = None
         self.current_scan_id = None
-        
+
+        # Worker thread for background analysis
+        self.analysis_worker = None
+        self.is_analyzing = False
+
         self.init_ui()
         
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("DeskOpt - AI Ergonomics Engine")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setWindowTitle(Config.APP_NAME)
+        self.setGeometry(100, 100, Config.WINDOW_WIDTH, Config.WINDOW_HEIGHT)
+        self.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)
         
         # Central widget
         central_widget = QWidget()
@@ -232,21 +239,30 @@ class DeskOptMainWindow(QMainWindow):
         
         # Left panel - Controls (fixed width)
         left_panel = self.create_control_panel()
-        left_panel.setFixedWidth(200)
+        left_panel.setFixedWidth(Config.LEFT_PANEL_WIDTH)
         main_layout.addWidget(left_panel)
-        
+
         # Center - Image display (fits to available space)
         self.image_widget = ImageWidget()
         self.image_widget.point_clicked.connect(self.handle_image_click)
         main_layout.addWidget(self.image_widget, 1)
-        
+
         # Right panel - Results (fixed width)
         right_panel = self.create_results_panel()
-        right_panel.setFixedWidth(250)
+        right_panel.setFixedWidth(Config.RIGHT_PANEL_WIDTH)
         main_layout.addWidget(right_panel)
-        
-        # Status bar
-        self.statusBar().showMessage("Ready - Import an image to begin")
+
+        # Status bar with progress bar
+        self.statusBar().showMessage(Config.MSG_READY)
+
+        # Progress bar (hidden by default)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedWidth(Config.PROGRESS_BAR_WIDTH)
+        self.progress_bar.setVisible(False)
+        self.statusBar().addPermanentWidget(self.progress_bar)
         
     def create_control_panel(self):
         """Create the control panel"""
@@ -405,13 +421,16 @@ class DeskOptMainWindow(QMainWindow):
                     return
 
                 # Validate name length
-                if len(name) > 50:
-                    QMessageBox.warning(dialog, "Invalid Input", "Profile name must be 50 characters or less.")
+                if len(name) > Config.MAX_PROFILE_NAME_LENGTH:
+                    QMessageBox.warning(
+                        dialog, "Invalid Input",
+                        f"Profile name must be {Config.MAX_PROFILE_NAME_LENGTH} characters or less."
+                    )
                     return
 
                 # Validate name characters (alphanumeric, spaces, and basic punctuation)
                 import re
-                if not re.match(r'^[a-zA-Z0-9\s\-_.]+$', name):
+                if not re.match(Config.PROFILE_NAME_PATTERN, name):
                     QMessageBox.warning(
                         dialog, "Invalid Input",
                         "Profile name can only contain letters, numbers, spaces, hyphens, underscores, and periods."
@@ -460,15 +479,18 @@ class DeskOptMainWindow(QMainWindow):
                 raise FileNotFoundError(f"File does not exist: {file_path}")
 
             # Validate file extension
-            allowed_extensions = {'.png', '.jpg', '.jpeg', '.bmp'}
-            if Path(file_path).suffix.lower() not in allowed_extensions:
-                raise ValueError(f"Invalid file type. Please use: {', '.join(allowed_extensions)}")
+            if not Config.is_valid_image_extension(file_path):
+                raise ValueError(
+                    f"Invalid file type. Please use: {', '.join(Config.ALLOWED_IMAGE_EXTENSIONS)}"
+                )
 
-            # Validate file size (max 50MB)
+            # Validate file size
             file_size = os.path.getsize(file_path)
-            max_size = 50 * 1024 * 1024  # 50MB
-            if file_size > max_size:
-                raise ValueError(f"File too large ({file_size / 1024 / 1024:.1f}MB). Maximum size is 50MB.")
+            if file_size > Config.MAX_IMAGE_SIZE_BYTES:
+                raise ValueError(
+                    f"File too large ({file_size / 1024 / 1024:.1f}MB). "
+                    f"Maximum size is {Config.MAX_IMAGE_SIZE_MB}MB."
+                )
 
             logger.info(f"Importing image: {file_path}")
 
@@ -545,8 +567,16 @@ class DeskOptMainWindow(QMainWindow):
                 self.image_widget.set_mode('view')
     
     def analyze_setup(self):
-        """Analyze the desk setup"""
+        """Analyze the desk setup using background worker thread"""
         try:
+            # Prevent multiple simultaneous analyses
+            if self.is_analyzing:
+                QMessageBox.warning(
+                    self, "Analysis in Progress",
+                    "An analysis is already running. Please wait for it to complete."
+                )
+                return
+
             # Validation checks
             if not self.current_image_path:
                 QMessageBox.warning(
@@ -579,71 +609,70 @@ class DeskOptMainWindow(QMainWindow):
                 )
                 return
 
-            logger.info("Starting desk analysis...")
-            self.statusBar().showMessage("Detecting objects...")
+            # Prepare parameters for worker thread
+            params = {
+                'image_path': self.current_image_path,
+                'profile_id': profile_id,
+                'role': self.role_combo.currentText().lower(),
+                'handedness': self.handedness_combo.currentText().lower()
+            }
 
-            # Detect objects
-            detected_items = self.detector.detect_objects(self.current_image_path)
-
-            if not detected_items:
-                QMessageBox.information(
-                    self, "No Items Detected",
-                    "No desk items were detected in the image. Try:\n"
-                    "• Using better lighting\n"
-                    "• Taking a clearer photo\n"
-                    "• Ensuring items are visible and not obscured"
-                )
-                logger.warning("No items detected in image")
-                return
-
-            logger.info(f"Detected {len(detected_items)} items, processing...")
-            self.statusBar().showMessage("Processing detected items...")
-
-            # Transform to desk coordinates
-            processed_items = []
-            for item in detected_items:
-                x_cm, y_cm = self.calibration.transform_to_desk_coordinates(item['x'], item['y'])
-                if x_cm is not None:
-                    processed_items.append({
-                        'item_slug': item['slug'],
-                        'x_pos': x_cm,
-                        'y_pos': y_cm,
-                        'width': self.calibration.pixels_to_cm(item['width']),
-                        'height': self.calibration.pixels_to_cm(item['height']),
-                        'confidence': item['confidence']
-                    })
-
-            if not processed_items:
-                raise ValueError("Failed to process any detected items")
-
-            self.statusBar().showMessage("Saving scan data...")
-
-            # Save scan
-            desk_bounds = self.calibration.get_desk_bounds_json()
-            self.current_scan_id = self.db.save_scan(
-                profile_id, self.current_image_path,
-                self.calibration.scale_factor, desk_bounds
+            # Create and configure worker thread
+            self.analysis_worker = AnalysisWorker(
+                self.detector,
+                self.calibration,
+                self.db,
+                self.ergonomic_engine,
+                params
             )
 
-            # Save detected items
-            self.db.save_detected_items(self.current_scan_id, processed_items)
+            # Connect signals
+            self.analysis_worker.progress.connect(self.on_analysis_progress)
+            self.analysis_worker.finished.connect(self.on_analysis_finished)
+            self.analysis_worker.error.connect(self.on_analysis_error)
 
-            self.statusBar().showMessage("Analyzing ergonomics...")
+            # Update UI state
+            self.is_analyzing = True
+            self.progress_bar.setValue(0)
+            self.progress_bar.setVisible(True)
+            self.statusBar().showMessage("Starting analysis...")
 
-            # Analyze ergonomics
-            role = self.role_combo.currentText().lower()
-            handedness = self.handedness_combo.currentText().lower()
-            desk_width_cm, desk_height_cm = self.calibration.get_desk_dimensions_cm()
-            analysis = self.ergonomic_engine.analyze_ergonomics(
-                self.current_scan_id, role, desk_width_cm, desk_height_cm, handedness
+            # Start worker thread
+            logger.info("Starting background analysis...")
+            self.analysis_worker.start()
+
+        except Exception as e:
+            logger.error(f"Failed to start analysis: {e}", exc_info=True)
+            self.is_analyzing = False
+            self.progress_bar.setVisible(False)
+            QMessageBox.critical(
+                self,
+                "Analysis Error",
+                f"Failed to start analysis:\n\n{str(e)}"
             )
+
+    def on_analysis_progress(self, message, percentage):
+        """Handle progress updates from worker thread"""
+        self.statusBar().showMessage(message)
+        self.progress_bar.setValue(percentage)
+        logger.debug(f"Analysis progress: {percentage}% - {message}")
+
+    def on_analysis_finished(self, results):
+        """Handle successful completion of analysis"""
+        try:
+            logger.info("Analysis worker finished successfully")
+
+            # Update state
+            self.is_analyzing = False
+            self.progress_bar.setVisible(False)
+            self.current_scan_id = results['scan_id']
 
             # Display results
-            self.display_results(processed_items, analysis)
+            self.display_results(results['processed_items'], results['analysis'])
 
-            # Show detected items on image (convert back to pixel coordinates for display)
+            # Show detected items on image
             display_items = []
-            for item in detected_items:
+            for item in results['detected_items']:
                 display_items.append({
                     'x': item['x'],
                     'y': item['y'],
@@ -653,18 +682,40 @@ class DeskOptMainWindow(QMainWindow):
                 })
             self.image_widget.set_detected_items(display_items)
 
-            self.statusBar().showMessage(f"Analysis complete! Score: {analysis['score']}/100")
-            logger.info(f"Analysis completed successfully. Score: {analysis['score']}")
+            # Update status
+            score = results['analysis']['score']
+            self.statusBar().showMessage(f"Analysis complete! Ergonomic Score: {score}/100")
+            logger.info(f"Analysis completed. Score: {score}")
+
+            # Clean up worker
+            if self.analysis_worker:
+                self.analysis_worker.deleteLater()
+                self.analysis_worker = None
 
         except Exception as e:
-            logger.error(f"Analysis failed: {e}", exc_info=True)
-            QMessageBox.critical(
-                self,
-                "Analysis Error",
-                f"Failed to analyze desk setup:\n\n{str(e)}\n\n"
-                "Please check the log file for details."
-            )
-            self.statusBar().showMessage("Analysis failed")
+            logger.error(f"Error handling analysis results: {e}", exc_info=True)
+            self.on_analysis_error(f"Failed to display results: {str(e)}")
+
+    def on_analysis_error(self, error_message):
+        """Handle analysis errors"""
+        logger.error(f"Analysis error: {error_message}")
+
+        # Update state
+        self.is_analyzing = False
+        self.progress_bar.setVisible(False)
+        self.statusBar().showMessage("Analysis failed")
+
+        # Show error to user
+        QMessageBox.critical(
+            self,
+            "Analysis Error",
+            f"{error_message}\n\nPlease check the log file for details."
+        )
+
+        # Clean up worker
+        if self.analysis_worker:
+            self.analysis_worker.deleteLater()
+            self.analysis_worker = None
     
     def display_results(self, items, analysis):
         """Display analysis results"""
@@ -689,12 +740,7 @@ class DeskOptMainWindow(QMainWindow):
         self.score_label.setText(f"Ergonomic Score: {analysis['score']}/100")
         
         # Color code the score
-        if analysis['score'] >= 80:
-            color = "green"
-        elif analysis['score'] >= 60:
-            color = "orange"
-        else:
-            color = "red"
+        color = Config.get_score_color(analysis['score'])
         self.score_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
 
 def main():

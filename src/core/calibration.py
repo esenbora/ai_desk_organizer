@@ -4,14 +4,15 @@ import json
 import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import Config
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 class CalibrationManager:
     def __init__(self):
-        self.card_width_cm = 8.5  # Standard credit card width
-        self.card_height_cm = 5.4  # Standard credit card height
+        self.card_width_cm = Config.CARD_WIDTH_CM
+        self.card_height_cm = Config.CARD_HEIGHT_CM
         self.calibration_points = []
         self.scale_factor = None
         self.desk_corners = []
@@ -61,10 +62,10 @@ class CalibrationManager:
             height_pixels = (height_pixels_left + height_pixels_right) / 2
 
             # Validate dimensions
-            if width_pixels < 10 or height_pixels < 10:
+            if width_pixels < Config.MIN_CALIBRATION_PIXELS or height_pixels < Config.MIN_CALIBRATION_PIXELS:
                 raise ValueError(f"Calibration points too close: {width_pixels:.1f}x{height_pixels:.1f} pixels")
 
-            if width_pixels > 10000 or height_pixels > 10000:
+            if width_pixels > Config.MAX_CALIBRATION_PIXELS or height_pixels > Config.MAX_CALIBRATION_PIXELS:
                 raise ValueError(f"Calibration points unrealistic: {width_pixels:.1f}x{height_pixels:.1f} pixels")
 
             # Calculate scale factors
@@ -73,8 +74,11 @@ class CalibrationManager:
 
             # Check for perspective distortion
             scale_diff = abs(scale_x - scale_y) / max(scale_x, scale_y)
-            if scale_diff > 0.3:  # More than 30% difference
-                logger.warning(f"Significant perspective distortion detected: X={scale_x:.2f}, Y={scale_y:.2f}")
+            if scale_diff > Config.MAX_PERSPECTIVE_DISTORTION:
+                logger.warning(
+                    f"Significant perspective distortion detected (>{Config.MAX_PERSPECTIVE_DISTORTION*100}%): "
+                    f"X={scale_x:.2f}, Y={scale_y:.2f}"
+                )
 
             # Use average scale factor
             self.scale_factor = (scale_x + scale_y) / 2

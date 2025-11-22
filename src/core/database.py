@@ -3,13 +3,14 @@ import os
 from pathlib import Path
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import Config
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 class DatabaseManager:
-    def __init__(self, db_path="data/deskopt.db"):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path or Config.get_db_path()
         self.ensure_database_exists()
     
     def ensure_database_exists(self):
@@ -197,10 +198,10 @@ class DatabaseManager:
         try:
             if not name or not name.strip():
                 raise ValueError("Profile name cannot be empty")
-            if role.lower() not in ['coder', 'artist', 'gamer', 'admin']:
-                raise ValueError(f"Invalid role: {role}")
-            if handedness.lower() not in ['left', 'right']:
-                raise ValueError(f"Invalid handedness: {handedness}")
+            if not Config.is_valid_role(role):
+                raise ValueError(f"Invalid role: {role}. Must be one of: {', '.join(Config.VALID_ROLES)}")
+            if not Config.is_valid_handedness(handedness):
+                raise ValueError(f"Invalid handedness: {handedness}. Must be one of: {', '.join(Config.VALID_HANDEDNESS)}")
 
             with self.get_connection() as conn:
                 cursor = conn.cursor()

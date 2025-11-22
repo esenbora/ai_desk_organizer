@@ -1,22 +1,31 @@
 import logging
+import logging.handlers
 import sys
+import os
 from pathlib import Path
 
-def setup_logger(name, log_file='deskopt.log', level=logging.INFO):
+# Import config
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import Config
+
+
+def setup_logger(name, log_file=None, level=None):
     """
     Setup logger with both file and console handlers
 
     Args:
         name: Logger name (usually __name__)
-        log_file: Path to log file
-        level: Logging level
+        log_file: Path to log file (optional, uses Config default)
+        level: Logging level (optional, uses Config default)
 
     Returns:
         Configured logger instance
     """
-    # Create logs directory if it doesn't exist
-    log_path = Path('logs')
-    log_path.mkdir(exist_ok=True)
+    # Use config defaults if not specified
+    if log_file is None:
+        log_file = Config.get_log_path()
+    if level is None:
+        level = getattr(logging, Config.LOG_LEVEL)
 
     # Create logger
     logger = logging.getLogger(name)
@@ -27,15 +36,15 @@ def setup_logger(name, log_file='deskopt.log', level=logging.INFO):
         return logger
 
     # Create formatters
-    detailed_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
-    )
-    simple_formatter = logging.Formatter(
-        '%(levelname)s - %(message)s'
-    )
+    detailed_formatter = logging.Formatter(Config.LOG_FORMAT)
+    simple_formatter = logging.Formatter('%(levelname)s - %(message)s')
 
-    # File handler - detailed logging
-    file_handler = logging.FileHandler(log_path / log_file)
+    # File handler with rotation - detailed logging
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=Config.LOG_MAX_BYTES,
+        backupCount=Config.LOG_BACKUP_COUNT
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(detailed_formatter)
     logger.addHandler(file_handler)

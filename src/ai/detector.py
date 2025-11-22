@@ -5,17 +5,19 @@ import json
 import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import Config
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 class ObjectDetector:
-    def __init__(self):
+    def __init__(self, model_path=None):
         try:
             # Load YOLOv8 model
-            logger.info("Loading YOLOv8 model...")
-            self.model = YOLO('yolov8n.pt')  # nano version for speed
-            logger.info("YOLOv8 model loaded successfully")
+            model_path = model_path or Config.YOLO_MODEL_NAME
+            logger.info(f"Loading YOLO model: {model_path}...")
+            self.model = YOLO(model_path)
+            logger.info("YOLO model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}", exc_info=True)
             raise RuntimeError(f"Could not initialize object detector: {e}")
