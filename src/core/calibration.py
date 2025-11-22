@@ -1,6 +1,12 @@
 import cv2
 import numpy as np
 import json
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 class CalibrationManager:
     def __init__(self):
@@ -33,32 +39,52 @@ class CalibrationManager:
         Calculate pixels per cm from the calibration points
         Assumes points are ordered: top-left, top-right, bottom-right, bottom-left
         """
-        if not self.is_calibration_complete():
-            return None
-        
-        # Calculate pixel dimensions of the detected card
-        top_left = self.calibration_points[0]
-        top_right = self.calibration_points[1]
-        bottom_right = self.calibration_points[2]
-        bottom_left = self.calibration_points[3]
-        
-        # Calculate width in pixels (average of top and bottom edges)
-        width_pixels_top = np.linalg.norm(np.array(top_right) - np.array(top_left))
-        width_pixels_bottom = np.linalg.norm(np.array(bottom_right) - np.array(bottom_left))
-        width_pixels = (width_pixels_top + width_pixels_bottom) / 2
-        
-        # Calculate height in pixels (average of left and right edges)
-        height_pixels_left = np.linalg.norm(np.array(bottom_left) - np.array(top_left))
-        height_pixels_right = np.linalg.norm(np.array(bottom_right) - np.array(top_right))
-        height_pixels = (height_pixels_left + height_pixels_right) / 2
-        
-        # Calculate scale factors
-        scale_x = width_pixels / self.card_width_cm
-        scale_y = height_pixels / self.card_height_cm
-        
-        # Use average scale factor
-        self.scale_factor = (scale_x + scale_y) / 2
-        return self.scale_factor
+        try:
+            if not self.is_calibration_complete():
+                logger.warning("Calibration incomplete: need 4 points")
+                return None
+
+            # Calculate pixel dimensions of the detected card
+            top_left = self.calibration_points[0]
+            top_right = self.calibration_points[1]
+            bottom_right = self.calibration_points[2]
+            bottom_left = self.calibration_points[3]
+
+            # Calculate width in pixels (average of top and bottom edges)
+            width_pixels_top = np.linalg.norm(np.array(top_right) - np.array(top_left))
+            width_pixels_bottom = np.linalg.norm(np.array(bottom_right) - np.array(bottom_left))
+            width_pixels = (width_pixels_top + width_pixels_bottom) / 2
+
+            # Calculate height in pixels (average of left and right edges)
+            height_pixels_left = np.linalg.norm(np.array(bottom_left) - np.array(top_left))
+            height_pixels_right = np.linalg.norm(np.array(bottom_right) - np.array(top_right))
+            height_pixels = (height_pixels_left + height_pixels_right) / 2
+
+            # Validate dimensions
+            if width_pixels < 10 or height_pixels < 10:
+                raise ValueError(f"Calibration points too close: {width_pixels:.1f}x{height_pixels:.1f} pixels")
+
+            if width_pixels > 10000 or height_pixels > 10000:
+                raise ValueError(f"Calibration points unrealistic: {width_pixels:.1f}x{height_pixels:.1f} pixels")
+
+            # Calculate scale factors
+            scale_x = width_pixels / self.card_width_cm
+            scale_y = height_pixels / self.card_height_cm
+
+            # Check for perspective distortion
+            scale_diff = abs(scale_x - scale_y) / max(scale_x, scale_y)
+            if scale_diff > 0.3:  # More than 30% difference
+                logger.warning(f"Significant perspective distortion detected: X={scale_x:.2f}, Y={scale_y:.2f}")
+
+            # Use average scale factor
+            self.scale_factor = (scale_x + scale_y) / 2
+            logger.info(f"Calibration complete: scale factor = {self.scale_factor:.2f} pixels/cm")
+            return self.scale_factor
+
+        except Exception as e:
+            logger.error(f"Calibration calculation failed: {e}", exc_info=True)
+            self.scale_factor = None
+            raise
     
     def pixels_to_cm(self, pixels):
         """Convert pixels to centimeters using the calculated scale factor"""

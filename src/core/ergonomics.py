@@ -1,5 +1,11 @@
 import math
 import json
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 class ErgonomicEngine:
     def __init__(self, database_manager):

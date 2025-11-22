@@ -1,6 +1,6 @@
 import sys
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QHBoxLayout, QLabel, QPushButton, QComboBox, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                            QHBoxLayout, QLabel, QPushButton, QComboBox,
                             QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
                             QTabWidget, QTextEdit, QSplitter, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
@@ -10,8 +10,11 @@ import numpy as np
 
 from core.database import DatabaseManager
 from core.calibration import CalibrationManager
-from ai.mock_detector import MockObjectDetector as ObjectDetector
+from ai.detector import ObjectDetector
 from core.ergonomics import ErgonomicEngine
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 class ImageWidget(QWidget):
     """Custom widget for displaying and interacting with images"""
@@ -32,30 +35,41 @@ class ImageWidget(QWidget):
         
     def set_image(self, image_path):
         """Load and display an image"""
-        # Load image with OpenCV for processing
-        self.image = cv2.imread(image_path)
-        
-        # Load image directly with QPixmap for display
-        self.original_pixmap = QPixmap(image_path)
-        
-        if self.original_pixmap.isNull():
-            print(f"Failed to load image: {image_path}")
-            return
-            
-        # Get image dimensions
-        w = self.original_pixmap.width()
-        h = self.original_pixmap.height()
-        
-        print(f"Image loaded: {w}x{h}")
-        
-        # Store original size and reset scaling
-        self.original_width = w
-        self.original_height = h
-        self.scale_factor = 1.0
-        
-        # Trigger resize to fit available space
-        self.update_image_scaling()
-        self.update()
+        try:
+            # Load image with OpenCV for processing
+            self.image = cv2.imread(image_path)
+            if self.image is None:
+                raise ValueError(f"OpenCV failed to read image: {image_path}")
+
+            # Load image directly with QPixmap for display
+            self.original_pixmap = QPixmap(image_path)
+
+            if self.original_pixmap.isNull():
+                raise ValueError(f"QPixmap failed to load image: {image_path}")
+
+            # Get image dimensions
+            w = self.original_pixmap.width()
+            h = self.original_pixmap.height()
+
+            if w <= 0 or h <= 0:
+                raise ValueError(f"Invalid image dimensions: {w}x{h}")
+
+            logger.info(f"Image loaded successfully: {w}x{h}")
+
+            # Store original size and reset scaling
+            self.original_width = w
+            self.original_height = h
+            self.scale_factor = 1.0
+
+            # Trigger resize to fit available space
+            self.update_image_scaling()
+            self.update()
+
+        except Exception as e:
+            logger.error(f"Error loading image: {e}", exc_info=True)
+            self.original_pixmap = None
+            self.image = None
+            raise
     
     def set_mode(self, mode):
         """Set interaction mode"""
@@ -384,14 +398,44 @@ class DeskOptMainWindow(QMainWindow):
         layout.addLayout(buttons_layout)
         
         def save_profile():
-            name = name_input.text().strip()
-            if name:
+            try:
+                name = name_input.text().strip()
+                if not name:
+                    QMessageBox.warning(dialog, "Invalid Input", "Please enter a profile name.")
+                    return
+
+                # Validate name length
+                if len(name) > 50:
+                    QMessageBox.warning(dialog, "Invalid Input", "Profile name must be 50 characters or less.")
+                    return
+
+                # Validate name characters (alphanumeric, spaces, and basic punctuation)
+                import re
+                if not re.match(r'^[a-zA-Z0-9\s\-_.]+$', name):
+                    QMessageBox.warning(
+                        dialog, "Invalid Input",
+                        "Profile name can only contain letters, numbers, spaces, hyphens, underscores, and periods."
+                    )
+                    return
+
                 role = role_input.currentText().lower()
                 handedness = hand_input.currentText().lower()
+
+                logger.info(f"Creating new profile: {name}, role={role}, handedness={handedness}")
                 profile_id = self.db.create_profile(name, role, handedness)
                 self.load_profiles()
                 self.profile_combo.setCurrentIndex(self.profile_combo.count() - 1)
                 dialog.accept()
+                QMessageBox.information(
+                    dialog, "Success",
+                    f"Profile '{name}' created successfully!"
+                )
+            except Exception as e:
+                logger.error(f"Failed to create profile: {e}", exc_info=True)
+                QMessageBox.critical(
+                    dialog, "Error",
+                    f"Failed to create profile:\n\n{str(e)}"
+                )
         
         save_btn.clicked.connect(save_profile)
         cancel_btn.clicked.connect(dialog.reject)
@@ -400,26 +444,60 @@ class DeskOptMainWindow(QMainWindow):
     
     def import_image(self):
         """Import a desk photo"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Desk Photo", "", "Image Files (*.png *.jpg *.jpeg)"
-        )
-        
-        if file_path:
+        try:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Select Desk Photo", "", "Image Files (*.png *.jpg *.jpeg *.bmp)"
+            )
+
+            if not file_path:
+                return
+
+            # Validate file exists
+            import os
+            from pathlib import Path
+
+            if not os.path.isfile(file_path):
+                raise FileNotFoundError(f"File does not exist: {file_path}")
+
+            # Validate file extension
+            allowed_extensions = {'.png', '.jpg', '.jpeg', '.bmp'}
+            if Path(file_path).suffix.lower() not in allowed_extensions:
+                raise ValueError(f"Invalid file type. Please use: {', '.join(allowed_extensions)}")
+
+            # Validate file size (max 50MB)
+            file_size = os.path.getsize(file_path)
+            max_size = 50 * 1024 * 1024  # 50MB
+            if file_size > max_size:
+                raise ValueError(f"File too large ({file_size / 1024 / 1024:.1f}MB). Maximum size is 50MB.")
+
+            logger.info(f"Importing image: {file_path}")
+
+            # Try to load the image
             self.current_image_path = file_path
             self.image_widget.set_image(file_path)
             self.image_widget.set_mode('view')
-            
+
             # Update status bar with image info
-            import os
             filename = os.path.basename(file_path)
-            
-            # Get image info for debugging
             pixmap = QPixmap(file_path)
             if not pixmap.isNull():
-                self.statusBar().showMessage(f"Loaded: {filename} ({pixmap.width()}x{pixmap.height()}) - Scale: {self.image_widget.scale_factor:.2f}")
+                self.statusBar().showMessage(
+                    f"Loaded: {filename} ({pixmap.width()}x{pixmap.height()}) - "
+                    f"Scale: {self.image_widget.scale_factor:.2f}"
+                )
+                logger.info(f"Image imported successfully: {filename}")
             else:
-                self.statusBar().showMessage(f"Failed to load: {filename}")
-                QMessageBox.warning(self, "Error", f"Could not load image: {filename}")
+                raise ValueError("Failed to create pixmap from image")
+
+        except Exception as e:
+            logger.error(f"Failed to import image: {e}", exc_info=True)
+            self.current_image_path = None
+            QMessageBox.critical(
+                self,
+                "Image Import Error",
+                f"Failed to load image:\n\n{str(e)}\n\nPlease try a different image."
+            )
+            self.statusBar().showMessage("Image import failed")
     
     def start_calibration(self):
         """Start card calibration"""
@@ -468,73 +546,125 @@ class DeskOptMainWindow(QMainWindow):
     
     def analyze_setup(self):
         """Analyze the desk setup"""
-        if not self.current_image_path:
-            QMessageBox.warning(self, "Warning", "Please import an image first")
-            return
-        
-        if self.calibration.scale_factor is None:
-            QMessageBox.warning(self, "Warning", "Please complete calibration first")
-            return
-        
-        if not self.calibration.is_desk_complete():
-            QMessageBox.warning(self, "Warning", "Please mark desk edges first")
-            return
-        
-        # Detect objects
-        detected_items = self.detector.detect_objects(self.current_image_path)
-        
-        # Transform to desk coordinates
-        processed_items = []
-        for item in detected_items:
-            x_cm, y_cm = self.calibration.transform_to_desk_coordinates(item['x'], item['y'])
-            if x_cm is not None:
-                processed_items.append({
-                    'item_slug': item['slug'],
-                    'x_pos': x_cm,
-                    'y_pos': y_cm,
-                    'width': self.calibration.pixels_to_cm(item['width']),
-                    'height': self.calibration.pixels_to_cm(item['height']),
-                    'confidence': item['confidence']
+        try:
+            # Validation checks
+            if not self.current_image_path:
+                QMessageBox.warning(
+                    self, "No Image",
+                    "Please import a desk photo using the 'Import Desk Photo' button first."
+                )
+                return
+
+            if self.calibration.scale_factor is None:
+                QMessageBox.warning(
+                    self, "Calibration Required",
+                    "Please complete calibration by clicking 'Calibrate with Card' and "
+                    "selecting the 4 corners of a credit card in your image."
+                )
+                return
+
+            if not self.calibration.is_desk_complete():
+                QMessageBox.warning(
+                    self, "Desk Marking Required",
+                    "Please mark your desk edges by clicking 'Mark Desk Edges' and "
+                    "selecting the 4 corners of your desk surface."
+                )
+                return
+
+            profile_id = self.profile_combo.currentData()
+            if not profile_id:
+                QMessageBox.warning(
+                    self, "Profile Required",
+                    "Please select an existing profile or create a new one."
+                )
+                return
+
+            logger.info("Starting desk analysis...")
+            self.statusBar().showMessage("Detecting objects...")
+
+            # Detect objects
+            detected_items = self.detector.detect_objects(self.current_image_path)
+
+            if not detected_items:
+                QMessageBox.information(
+                    self, "No Items Detected",
+                    "No desk items were detected in the image. Try:\n"
+                    "• Using better lighting\n"
+                    "• Taking a clearer photo\n"
+                    "• Ensuring items are visible and not obscured"
+                )
+                logger.warning("No items detected in image")
+                return
+
+            logger.info(f"Detected {len(detected_items)} items, processing...")
+            self.statusBar().showMessage("Processing detected items...")
+
+            # Transform to desk coordinates
+            processed_items = []
+            for item in detected_items:
+                x_cm, y_cm = self.calibration.transform_to_desk_coordinates(item['x'], item['y'])
+                if x_cm is not None:
+                    processed_items.append({
+                        'item_slug': item['slug'],
+                        'x_pos': x_cm,
+                        'y_pos': y_cm,
+                        'width': self.calibration.pixels_to_cm(item['width']),
+                        'height': self.calibration.pixels_to_cm(item['height']),
+                        'confidence': item['confidence']
+                    })
+
+            if not processed_items:
+                raise ValueError("Failed to process any detected items")
+
+            self.statusBar().showMessage("Saving scan data...")
+
+            # Save scan
+            desk_bounds = self.calibration.get_desk_bounds_json()
+            self.current_scan_id = self.db.save_scan(
+                profile_id, self.current_image_path,
+                self.calibration.scale_factor, desk_bounds
+            )
+
+            # Save detected items
+            self.db.save_detected_items(self.current_scan_id, processed_items)
+
+            self.statusBar().showMessage("Analyzing ergonomics...")
+
+            # Analyze ergonomics
+            role = self.role_combo.currentText().lower()
+            handedness = self.handedness_combo.currentText().lower()
+            desk_width_cm, desk_height_cm = self.calibration.get_desk_dimensions_cm()
+            analysis = self.ergonomic_engine.analyze_ergonomics(
+                self.current_scan_id, role, desk_width_cm, desk_height_cm, handedness
+            )
+
+            # Display results
+            self.display_results(processed_items, analysis)
+
+            # Show detected items on image (convert back to pixel coordinates for display)
+            display_items = []
+            for item in detected_items:
+                display_items.append({
+                    'x': item['x'],
+                    'y': item['y'],
+                    'width': item['width'],
+                    'height': item['height'],
+                    'slug': item['slug']
                 })
-        
-        # Get profile info
-        profile_id = self.profile_combo.currentData()
-        if not profile_id:
-            QMessageBox.warning(self, "Warning", "Please select or create a profile")
-            return
-        
-        # Save scan
-        desk_bounds = self.calibration.get_desk_bounds_json()
-        self.current_scan_id = self.db.save_scan(
-            profile_id, self.current_image_path, 
-            self.calibration.scale_factor, desk_bounds
-        )
-        
-        # Save detected items
-        self.db.save_detected_items(self.current_scan_id, processed_items)
-        
-        # Analyze ergonomics
-        role = self.role_combo.currentText().lower()
-        handedness = self.handedness_combo.currentText().lower()
-        desk_width_cm, desk_height_cm = self.calibration.get_desk_dimensions_cm()
-        analysis = self.ergonomic_engine.analyze_ergonomics(
-            self.current_scan_id, role, desk_width_cm, desk_height_cm, handedness
-        )
-        
-        # Display results
-        self.display_results(processed_items, analysis)
-        
-        # Show detected items on image (convert back to pixel coordinates for display)
-        display_items = []
-        for item in detected_items:
-            display_items.append({
-                'x': item['x'],
-                'y': item['y'], 
-                'width': item['width'],
-                'height': item['height'],
-                'slug': item['slug']
-            })
-        self.image_widget.set_detected_items(display_items)
+            self.image_widget.set_detected_items(display_items)
+
+            self.statusBar().showMessage(f"Analysis complete! Score: {analysis['score']}/100")
+            logger.info(f"Analysis completed successfully. Score: {analysis['score']}")
+
+        except Exception as e:
+            logger.error(f"Analysis failed: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Analysis Error",
+                f"Failed to analyze desk setup:\n\n{str(e)}\n\n"
+                "Please check the log file for details."
+            )
+            self.statusBar().showMessage("Analysis failed")
     
     def display_results(self, items, analysis):
         """Display analysis results"""
