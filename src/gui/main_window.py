@@ -727,13 +727,45 @@ class DeskOptMainWindow(QMainWindow):
             self.items_table.setItem(i, 2, QTableWidgetItem(f"{item['confidence']:.2f}"))
             self.items_table.setItem(i, 3, QTableWidgetItem("Keep"))
         
-        # Update recommendations
+        # Update recommendations with violation details
         recommendations_text = ""
+
+        # Add violation summary
+        violations = analysis.get('violations', [])
+        if violations:
+            # Group violations by priority
+            p1_violations = [v for v in violations if v['priority'] == 1]
+            p2_violations = [v for v in violations if v['priority'] == 2]
+            p3_violations = [v for v in violations if v['priority'] == 3]
+
+            recommendations_text += "=== ERGONOMIC VIOLATIONS ===\n\n"
+
+            if p1_violations:
+                recommendations_text += f"🔴 High Priority ({len(p1_violations)}):\n"
+                for v in p1_violations:
+                    recommendations_text += f"  • {v['item']}: {v['advice']}\n"
+                recommendations_text += "\n"
+
+            if p2_violations:
+                recommendations_text += f"🟡 Medium Priority ({len(p2_violations)}):\n"
+                for v in p2_violations:
+                    recommendations_text += f"  • {v['item']}: {v['advice']}\n"
+                recommendations_text += "\n"
+
+            if p3_violations:
+                recommendations_text += f"🟢 Low Priority ({len(p3_violations)}):\n"
+                for v in p3_violations:
+                    recommendations_text += f"  • {v['item']}: {v['advice']}\n"
+                recommendations_text += "\n"
+
+            recommendations_text += "=== RECOMMENDED POSITIONS ===\n\n"
+
+        # Add detailed recommendations
         for rec in analysis['recommendations']:
             recommendations_text += f"• {rec['item']}: {rec['advice']}\n"
             recommendations_text += f"  Move from ({rec['current_pos'][0]:.1f}, {rec['current_pos'][1]:.1f}) "
             recommendations_text += f"to ({rec['optimal_pos'][0]:.1f}, {rec['optimal_pos'][1]:.1f})\n\n"
-        
+
         self.recommendations_text.setPlainText(recommendations_text or "No recommendations - Great setup!")
         
         # Update score

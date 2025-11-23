@@ -53,8 +53,8 @@ class Config:
     MAX_IMAGE_SIZE_BYTES = MAX_IMAGE_SIZE_MB * 1024 * 1024
 
     # YOLO Model
-    YOLO_MODEL_NAME = "yolov8n.pt"  # nano version for speed
-    YOLO_CONFIDENCE_THRESHOLD = 0.5
+    YOLO_MODEL_NAME = "yolov8m.pt"  # medium version for better accuracy
+    YOLO_CONFIDENCE_THRESHOLD = 0.7  # Higher threshold = fewer false positives
     YOLO_IOU_THRESHOLD = 0.45
 
     # Profile

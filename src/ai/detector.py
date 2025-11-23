@@ -24,14 +24,26 @@ class ObjectDetector:
 
         # Mapping of YOLO classes to our desk item categories
         self.class_mapping = {
+            # Core peripherals
             'laptop': 'laptop',
-            'cell phone': 'phone',
-            'book': 'notebook',
-            'cup': 'cup',
             'mouse': 'mouse',
             'keyboard': 'keyboard',
-            'tv': 'monitor',  # TV often used as monitor
-            'remote': 'mouse',  # Sometimes detected as remote
+            'tv': 'monitor',  # Large displays often detected as TV
+
+            # Communication devices
+            'cell phone': 'phone',
+
+            # Desk items
+            'book': 'notebook',
+            'cup': 'cup',
+            'bottle': 'bottle',
+
+            # Furniture & accessories
+            'chair': 'chair',
+            'clock': 'clock',
+
+            # Note: Removed bad mappings
+            # 'remote': 'mouse' - This was incorrect and caused false positives
         }
     
     def detect_objects(self, image_path):
@@ -60,6 +72,11 @@ class ObjectDetector:
                             # Get class name
                             class_name = self.model.names[class_id]
 
+                            # Filter by confidence threshold
+                            if confidence < Config.YOLO_CONFIDENCE_THRESHOLD:
+                                logger.debug(f"Skipping {class_name} with low confidence {confidence:.2f}")
+                                continue
+
                             # Map to our categories if recognized
                             if class_name in self.class_mapping:
                                 item_slug = self.class_mapping[class_name]
@@ -85,13 +102,74 @@ class ObjectDetector:
                             logger.warning(f"Error processing detection box: {e}")
                             continue
 
+            # Remove duplicates - keep highest confidence for each item type at similar locations
+            detected_items = self._remove_duplicates(detected_items)
+
             logger.info(f"Detection complete: {len(detected_items)} items found")
             return detected_items
 
         except Exception as e:
             logger.error(f"Object detection failed: {e}", exc_info=True)
             raise RuntimeError(f"Detection error: {e}")
-    
+
+    def _remove_duplicates(self, items, distance_threshold=100):
+        """
+        Remove duplicate detections of the same item type at similar locations.
+        Keeps the detection with highest confidence.
+
+        Args:
+            items: List of detected items
+            distance_threshold: Maximum distance (pixels) to consider items as duplicates
+
+        Returns:
+            Filtered list with duplicates removed
+        """
+        if not items:
+            return items
+
+        # Group items by slug
+        grouped = {}
+        for item in items:
+            slug = item['slug']
+            if slug not in grouped:
+                grouped[slug] = []
+            grouped[slug].append(item)
+
+        # For each slug group, remove duplicates
+        filtered_items = []
+        for slug, slug_items in grouped.items():
+            if len(slug_items) == 1:
+                filtered_items.append(slug_items[0])
+                continue
+
+            # Sort by confidence (highest first)
+            slug_items.sort(key=lambda x: x['confidence'], reverse=True)
+
+            # Keep items that are far enough apart
+            kept_items = []
+            for item in slug_items:
+                is_duplicate = False
+                for kept in kept_items:
+                    # Calculate distance
+                    dx = item['x'] - kept['x']
+                    dy = item['y'] - kept['y']
+                    distance = (dx**2 + dy**2)**0.5
+
+                    if distance < distance_threshold:
+                        is_duplicate = True
+                        logger.debug(f"Removing duplicate {slug} at ({item['x']:.1f}, {item['y']:.1f}), keeping higher confidence one")
+                        break
+
+                if not is_duplicate:
+                    kept_items.append(item)
+
+            filtered_items.extend(kept_items)
+
+        if len(filtered_items) < len(items):
+            logger.info(f"Removed {len(items) - len(filtered_items)} duplicate detections")
+
+        return filtered_items
+
     def add_manual_item(self, item_slug, x, y, width=50, height=50):
         """
         Add a manually identified item
