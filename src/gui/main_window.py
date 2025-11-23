@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QPushButton, QComboBox,
                             QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
                             QTabWidget, QTextEdit, QSplitter, QFrame, QProgressBar,
-                            QHeaderView, QAbstractItemView)
+                            QHeaderView, QAbstractItemView, QCheckBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QFont, QColor, QImage
 import cv2
@@ -31,6 +31,9 @@ class ImageWidget(QWidget):
         self.calibration_points = []
         self.desk_corners = []
         self.detected_items = []
+        self.recommendations = []  # Store recommendations for visual overlay
+        self.ergonomic_zones = []  # Store zone information
+        self.show_overlay = True   # Toggle for showing visual overlays
         self.mode = 'view'  # 'view', 'calibration', 'desk', 'review'
         self.scale_factor = 1.0
         self.original_width = 0
@@ -117,7 +120,203 @@ class ImageWidget(QWidget):
         """Set detected items for display"""
         self.detected_items = items
         self.update()
-    
+
+    def set_recommendations(self, recommendations):
+        """Set recommendations for visual overlay"""
+        self.recommendations = recommendations
+        self.update()
+
+    def set_ergonomic_zones(self, zones):
+        """Set ergonomic zones for visual overlay"""
+        self.ergonomic_zones = zones
+        self.update()
+
+    def toggle_overlay(self, show):
+        """Toggle visual overlay display"""
+        self.show_overlay = show
+        self.update()
+
+    def draw_ergonomic_zones(self, painter):
+        """Draw ergonomic zones (optimal, acceptable, poor)"""
+        if not self.ergonomic_zones:
+            return
+
+        for zone in self.ergonomic_zones:
+            zone_type = zone.get('type', 'optimal')
+            x = int(zone['x'] * self.scale_factor)
+            y = int(zone['y'] * self.scale_factor)
+            width = int(zone['width'] * self.scale_factor)
+            height = int(zone['height'] * self.scale_factor)
+
+            # Color based on zone type
+            if zone_type == 'optimal':
+                color = QColor(0, 255, 0, 50)  # Green, semi-transparent
+            elif zone_type == 'acceptable':
+                color = QColor(255, 255, 0, 50)  # Yellow
+            else:
+                color = QColor(255, 0, 0, 50)  # Red
+
+            painter.fillRect(x, y, width, height, color)
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue()), 2))
+            painter.drawRect(x, y, width, height)
+
+            # Draw zone label
+            painter.setPen(QPen(QColor(0, 0, 0), 1))
+            font = QFont()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(x + 5, y + 15, zone_type.upper())
+
+    def draw_ergonomic_overlays(self, painter):
+        """Draw ergonomic zone overlays"""
+        # Calculate ergonomic zones based on desk dimensions
+        if not self.desk_corners or len(self.desk_corners) < 4:
+            return
+
+        # Get desk bounds
+        desk_xs = [c[0] for c in self.desk_corners]
+        desk_ys = [c[1] for c in self.desk_corners]
+        min_x, max_x = min(desk_xs), max(desk_xs)
+        min_y, max_y = min(desk_ys), max(desk_ys)
+        desk_width = max_x - min_x
+        desk_height = max_y - min_y
+
+        # Primary reach zone (40cm from front edge) - GREEN
+        primary_zone_depth = min(desk_height * 0.4, 40 * 10)  # Assume ~10 pixels per cm
+        zone_y = max_y - primary_zone_depth
+        painter.fillRect(
+            int(min_x * self.scale_factor),
+            int(zone_y * self.scale_factor),
+            int(desk_width * self.scale_factor),
+            int(primary_zone_depth * self.scale_factor),
+            QColor(0, 255, 0, 30)
+        )
+        painter.setPen(QPen(QColor(0, 200, 0), 2, Qt.PenStyle.DashLine))
+        painter.drawLine(
+            int(min_x * self.scale_factor),
+            int(zone_y * self.scale_factor),
+            int(max_x * self.scale_factor),
+            int(zone_y * self.scale_factor)
+        )
+
+        # Draw zone label
+        painter.setPen(QPen(QColor(0, 150, 0), 1))
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(
+            int((min_x + 10) * self.scale_factor),
+            int((zone_y + 15) * self.scale_factor),
+            "PRIMARY REACH ZONE"
+        )
+
+        # Secondary reach zone - YELLOW
+        secondary_zone_start = zone_y - primary_zone_depth * 0.5
+        if secondary_zone_start > min_y:
+            painter.fillRect(
+                int(min_x * self.scale_factor),
+                int(secondary_zone_start * self.scale_factor),
+                int(desk_width * self.scale_factor),
+                int(primary_zone_depth * 0.5 * self.scale_factor),
+                QColor(255, 255, 0, 20)
+            )
+            painter.setPen(QPen(QColor(200, 200, 0), 2, Qt.PenStyle.DashLine))
+            painter.drawLine(
+                int(min_x * self.scale_factor),
+                int(secondary_zone_start * self.scale_factor),
+                int(max_x * self.scale_factor),
+                int(secondary_zone_start * self.scale_factor)
+            )
+
+    def draw_item_bbox(self, painter, item):
+        """Draw enhanced bounding box for detected item"""
+        x = int(item['x'] * self.scale_factor)
+        y = int(item['y'] * self.scale_factor)
+        w = int(item['width'] * self.scale_factor)
+        h = int(item['height'] * self.scale_factor)
+
+        # Draw bounding box
+        pen = QPen(QColor(0, 150, 255), 2)
+        painter.setPen(pen)
+        painter.drawRect(x-w//2, y-h//2, w, h)
+
+        # Draw item label with background
+        label = item['slug'].upper()
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+
+        # Calculate label dimensions
+        metrics = painter.fontMetrics()
+        label_width = metrics.horizontalAdvance(label) + 8
+        label_height = metrics.height() + 4
+
+        # Draw label background
+        label_x = x - w//2
+        label_y = y - h//2 - label_height - 2
+        painter.fillRect(label_x, label_y, label_width, label_height, QColor(0, 150, 255))
+
+        # Draw label text
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        painter.drawText(label_x + 4, label_y + label_height - 4, label)
+
+    def draw_recommendation_arrows(self, painter):
+        """Draw arrows showing where items should move"""
+        for rec in self.recommendations:
+            if 'current_pos' not in rec or 'optimal_pos' not in rec:
+                continue
+
+            # Get current and optimal positions
+            curr_x = int(rec['current_pos'][0] * 10 * self.scale_factor)  # Convert cm to pixels
+            curr_y = int(rec['current_pos'][1] * 10 * self.scale_factor)
+            opt_x = int(rec['optimal_pos'][0] * 10 * self.scale_factor)
+            opt_y = int(rec['optimal_pos'][1] * 10 * self.scale_factor)
+
+            # Draw arrow from current to optimal position
+            painter.setPen(QPen(QColor(255, 100, 0), 3))
+            painter.drawLine(curr_x, curr_y, opt_x, opt_y)
+
+            # Draw arrowhead
+            angle = np.arctan2(opt_y - curr_y, opt_x - curr_x)
+            arrow_size = 15
+
+            # Arrow tip points
+            tip_x = opt_x
+            tip_y = opt_y
+            left_x = tip_x - arrow_size * np.cos(angle - np.pi/6)
+            left_y = tip_y - arrow_size * np.sin(angle - np.pi/6)
+            right_x = tip_x - arrow_size * np.cos(angle + np.pi/6)
+            right_y = tip_y - arrow_size * np.sin(angle + np.pi/6)
+
+            painter.drawLine(int(tip_x), int(tip_y), int(left_x), int(left_y))
+            painter.drawLine(int(tip_x), int(tip_y), int(right_x), int(right_y))
+
+            # Draw distance label
+            distance = np.sqrt((opt_x - curr_x)**2 + (opt_y - curr_y)**2) / (10 * self.scale_factor)
+            if distance > 1:  # Only show if movement > 1cm
+                mid_x = (curr_x + opt_x) // 2
+                mid_y = (curr_y + opt_y) // 2
+
+                label = f"{distance:.1f}cm"
+                font = QFont()
+                font.setPointSize(8)
+                font.setBold(True)
+                painter.setFont(font)
+
+                # Label background
+                metrics = painter.fontMetrics()
+                label_width = metrics.horizontalAdvance(label) + 6
+                label_height = metrics.height() + 2
+                painter.fillRect(mid_x - label_width//2, mid_y - label_height//2,
+                               label_width, label_height, QColor(255, 255, 255, 200))
+
+                # Label text
+                painter.setPen(QPen(QColor(255, 100, 0), 1))
+                painter.drawText(mid_x - label_width//2 + 3, mid_y + label_height//2 - 2, label)
+
     def paintEvent(self, event):
         """Draw the image and overlays"""
         if not self.pixmap:
@@ -162,17 +361,18 @@ class ImageWidget(QWidget):
                     x2, y2 = int(self.desk_corners[next_i][0] * self.scale_factor), int(self.desk_corners[next_i][1] * self.scale_factor)
                     painter.drawLine(x1, y1, x2, y2)
         
-        # Draw detected items
+        # Draw visual overlays (if enabled)
+        if self.show_overlay and self.mode == 'view':
+            self.draw_ergonomic_overlays(painter)
+
+        # Draw detected items with enhanced bounding boxes
         if self.detected_items:
-            pen = QPen(QColor(0, 0, 255), 2)
-            painter.setPen(pen)
             for item in self.detected_items:
-                x = int(item['x'] * self.scale_factor)
-                y = int(item['y'] * self.scale_factor)
-                w = int(item['width'] * self.scale_factor)
-                h = int(item['height'] * self.scale_factor)
-                painter.drawRect(x-w//2, y-h//2, w, h)
-                painter.drawText(x-w//2, y-h//2-5, item['slug'])
+                self.draw_item_bbox(painter, item)
+
+        # Draw recommendation arrows
+        if self.show_overlay and self.recommendations:
+            self.draw_recommendation_arrows(painter)
     
     def update_image_scaling(self):
         """Update image scaling to fit available space"""
@@ -336,7 +536,15 @@ class DeskOptMainWindow(QMainWindow):
         analyze_btn = QPushButton("Analyze Setup")
         analyze_btn.clicked.connect(self.analyze_setup)
         layout.addWidget(analyze_btn)
-        
+
+        # Visual overlay toggle
+        self.overlay_checkbox = QCheckBox("Show Visual Overlays")
+        self.overlay_checkbox.setChecked(True)
+        self.overlay_checkbox.stateChanged.connect(
+            lambda state: self.image_widget.toggle_overlay(state == Qt.CheckState.Checked.value)
+        )
+        layout.addWidget(self.overlay_checkbox)
+
         layout.addStretch()
         return panel
     
@@ -827,13 +1035,17 @@ class DeskOptMainWindow(QMainWindow):
             recommendations_text += f"to ({rec['optimal_pos'][0]:.1f}, {rec['optimal_pos'][1]:.1f})\n\n"
 
         self.recommendations_text.setPlainText(recommendations_text or "No recommendations - Great setup!")
-        
+
         # Update score
         self.score_label.setText(f"Ergonomic Score: {analysis['score']}/100")
-        
+
         # Color code the score
         color = Config.get_score_color(analysis['score'])
         self.score_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
+
+        # Update visual overlays on image
+        self.image_widget.set_recommendations(analysis.get('recommendations', []))
+        self.image_widget.set_mode('view')  # Enable overlay display mode
 
     def on_item_type_changed(self, row, new_type):
         """Handle item type change"""
