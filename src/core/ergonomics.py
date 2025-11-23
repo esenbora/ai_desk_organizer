@@ -123,11 +123,12 @@ class ErgonomicEngine:
         """
         Calculate ergonomic score (0-100)
         Higher priority violations reduce score more
+        Now includes severity multiplier based on deviation magnitude
         """
         if not violations:
             return 100
 
-        # Map priority to penalty using Config
+        # Map priority to base penalty using Config
         penalty_map = {
             1: Config.PRIORITY_1_PENALTY,
             2: Config.PRIORITY_2_PENALTY,
@@ -139,12 +140,48 @@ class ErgonomicEngine:
 
         for violation in violations:
             priority = violation['priority']
-            penalty = penalty_map.get(priority, Config.PRIORITY_3_PENALTY)
+            base_penalty = penalty_map.get(priority, Config.PRIORITY_3_PENALTY)
+
+            # Calculate severity multiplier based on deviation
+            severity_multiplier = self._calculate_severity_multiplier(violation)
+
+            # Final penalty with severity adjustment
+            penalty = base_penalty * severity_multiplier
             total_penalty += penalty
-            max_penalty += Config.PRIORITY_1_PENALTY  # Maximum possible penalty per violation
+            max_penalty += base_penalty * 2.0  # Max possible is 2x multiplier
 
         score = max(0, 100 - (total_penalty / max_penalty * 100))
         return round(score, 1)
+
+    def _calculate_severity_multiplier(self, violation):
+        """
+        Calculate severity multiplier based on how far off the item is
+        Returns 1.0 for minor deviation, up to 2.0 for severe deviation
+        """
+        if violation['type'] == 'too_close':
+            current = violation['current_distance']
+            recommended = violation['recommended_min']
+            deviation = (recommended - current) / recommended
+        elif violation['type'] == 'too_far':
+            current = violation['current_distance']
+            recommended = violation['recommended_max']
+            deviation = (current - recommended) / recommended
+        else:
+            return 1.0
+
+        # Map deviation to multiplier
+        # 0-10% deviation: 1.0x (minor)
+        # 10-30% deviation: 1.0-1.5x (moderate)
+        # 30-50% deviation: 1.5-2.0x (severe)
+        # >50% deviation: 2.0x (critical)
+        if deviation < 0.1:
+            return 1.0
+        elif deviation < 0.3:
+            return 1.0 + (deviation - 0.1) * 2.5  # Linear interpolation
+        elif deviation < 0.5:
+            return 1.5 + (deviation - 0.3) * 2.5
+        else:
+            return 2.0
     
     def generate_overlay_data(self, recommendations, desk_width_cm, desk_height_cm):
         """

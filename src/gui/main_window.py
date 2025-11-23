@@ -2,7 +2,8 @@ import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QPushButton, QComboBox,
                             QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
-                            QTabWidget, QTextEdit, QSplitter, QFrame, QProgressBar)
+                            QTabWidget, QTextEdit, QSplitter, QFrame, QProgressBar,
+                            QHeaderView, QAbstractItemView, QCheckBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QFont, QColor, QImage
 import cv2
@@ -30,6 +31,9 @@ class ImageWidget(QWidget):
         self.calibration_points = []
         self.desk_corners = []
         self.detected_items = []
+        self.recommendations = []  # Store recommendations for visual overlay
+        self.ergonomic_zones = []  # Store zone information
+        self.show_overlay = True   # Toggle for showing visual overlays
         self.mode = 'view'  # 'view', 'calibration', 'desk', 'review'
         self.scale_factor = 1.0
         self.original_width = 0
@@ -116,7 +120,203 @@ class ImageWidget(QWidget):
         """Set detected items for display"""
         self.detected_items = items
         self.update()
-    
+
+    def set_recommendations(self, recommendations):
+        """Set recommendations for visual overlay"""
+        self.recommendations = recommendations
+        self.update()
+
+    def set_ergonomic_zones(self, zones):
+        """Set ergonomic zones for visual overlay"""
+        self.ergonomic_zones = zones
+        self.update()
+
+    def toggle_overlay(self, show):
+        """Toggle visual overlay display"""
+        self.show_overlay = show
+        self.update()
+
+    def draw_ergonomic_zones(self, painter):
+        """Draw ergonomic zones (optimal, acceptable, poor)"""
+        if not self.ergonomic_zones:
+            return
+
+        for zone in self.ergonomic_zones:
+            zone_type = zone.get('type', 'optimal')
+            x = int(zone['x'] * self.scale_factor)
+            y = int(zone['y'] * self.scale_factor)
+            width = int(zone['width'] * self.scale_factor)
+            height = int(zone['height'] * self.scale_factor)
+
+            # Color based on zone type
+            if zone_type == 'optimal':
+                color = QColor(0, 255, 0, 50)  # Green, semi-transparent
+            elif zone_type == 'acceptable':
+                color = QColor(255, 255, 0, 50)  # Yellow
+            else:
+                color = QColor(255, 0, 0, 50)  # Red
+
+            painter.fillRect(x, y, width, height, color)
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue()), 2))
+            painter.drawRect(x, y, width, height)
+
+            # Draw zone label
+            painter.setPen(QPen(QColor(0, 0, 0), 1))
+            font = QFont()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(x + 5, y + 15, zone_type.upper())
+
+    def draw_ergonomic_overlays(self, painter):
+        """Draw ergonomic zone overlays"""
+        # Calculate ergonomic zones based on desk dimensions
+        if not self.desk_corners or len(self.desk_corners) < 4:
+            return
+
+        # Get desk bounds
+        desk_xs = [c[0] for c in self.desk_corners]
+        desk_ys = [c[1] for c in self.desk_corners]
+        min_x, max_x = min(desk_xs), max(desk_xs)
+        min_y, max_y = min(desk_ys), max(desk_ys)
+        desk_width = max_x - min_x
+        desk_height = max_y - min_y
+
+        # Primary reach zone (40cm from front edge) - GREEN
+        primary_zone_depth = min(desk_height * 0.4, 40 * 10)  # Assume ~10 pixels per cm
+        zone_y = max_y - primary_zone_depth
+        painter.fillRect(
+            int(min_x * self.scale_factor),
+            int(zone_y * self.scale_factor),
+            int(desk_width * self.scale_factor),
+            int(primary_zone_depth * self.scale_factor),
+            QColor(0, 255, 0, 30)
+        )
+        painter.setPen(QPen(QColor(0, 200, 0), 2, Qt.PenStyle.DashLine))
+        painter.drawLine(
+            int(min_x * self.scale_factor),
+            int(zone_y * self.scale_factor),
+            int(max_x * self.scale_factor),
+            int(zone_y * self.scale_factor)
+        )
+
+        # Draw zone label
+        painter.setPen(QPen(QColor(0, 150, 0), 1))
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(
+            int((min_x + 10) * self.scale_factor),
+            int((zone_y + 15) * self.scale_factor),
+            "PRIMARY REACH ZONE"
+        )
+
+        # Secondary reach zone - YELLOW
+        secondary_zone_start = zone_y - primary_zone_depth * 0.5
+        if secondary_zone_start > min_y:
+            painter.fillRect(
+                int(min_x * self.scale_factor),
+                int(secondary_zone_start * self.scale_factor),
+                int(desk_width * self.scale_factor),
+                int(primary_zone_depth * 0.5 * self.scale_factor),
+                QColor(255, 255, 0, 20)
+            )
+            painter.setPen(QPen(QColor(200, 200, 0), 2, Qt.PenStyle.DashLine))
+            painter.drawLine(
+                int(min_x * self.scale_factor),
+                int(secondary_zone_start * self.scale_factor),
+                int(max_x * self.scale_factor),
+                int(secondary_zone_start * self.scale_factor)
+            )
+
+    def draw_item_bbox(self, painter, item):
+        """Draw enhanced bounding box for detected item"""
+        x = int(item['x'] * self.scale_factor)
+        y = int(item['y'] * self.scale_factor)
+        w = int(item['width'] * self.scale_factor)
+        h = int(item['height'] * self.scale_factor)
+
+        # Draw bounding box
+        pen = QPen(QColor(0, 150, 255), 2)
+        painter.setPen(pen)
+        painter.drawRect(x-w//2, y-h//2, w, h)
+
+        # Draw item label with background
+        label = item['slug'].upper()
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+
+        # Calculate label dimensions
+        metrics = painter.fontMetrics()
+        label_width = metrics.horizontalAdvance(label) + 8
+        label_height = metrics.height() + 4
+
+        # Draw label background
+        label_x = x - w//2
+        label_y = y - h//2 - label_height - 2
+        painter.fillRect(label_x, label_y, label_width, label_height, QColor(0, 150, 255))
+
+        # Draw label text
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        painter.drawText(label_x + 4, label_y + label_height - 4, label)
+
+    def draw_recommendation_arrows(self, painter):
+        """Draw arrows showing where items should move"""
+        for rec in self.recommendations:
+            if 'current_pos' not in rec or 'optimal_pos' not in rec:
+                continue
+
+            # Get current and optimal positions
+            curr_x = int(rec['current_pos'][0] * 10 * self.scale_factor)  # Convert cm to pixels
+            curr_y = int(rec['current_pos'][1] * 10 * self.scale_factor)
+            opt_x = int(rec['optimal_pos'][0] * 10 * self.scale_factor)
+            opt_y = int(rec['optimal_pos'][1] * 10 * self.scale_factor)
+
+            # Draw arrow from current to optimal position
+            painter.setPen(QPen(QColor(255, 100, 0), 3))
+            painter.drawLine(curr_x, curr_y, opt_x, opt_y)
+
+            # Draw arrowhead
+            angle = np.arctan2(opt_y - curr_y, opt_x - curr_x)
+            arrow_size = 15
+
+            # Arrow tip points
+            tip_x = opt_x
+            tip_y = opt_y
+            left_x = tip_x - arrow_size * np.cos(angle - np.pi/6)
+            left_y = tip_y - arrow_size * np.sin(angle - np.pi/6)
+            right_x = tip_x - arrow_size * np.cos(angle + np.pi/6)
+            right_y = tip_y - arrow_size * np.sin(angle + np.pi/6)
+
+            painter.drawLine(int(tip_x), int(tip_y), int(left_x), int(left_y))
+            painter.drawLine(int(tip_x), int(tip_y), int(right_x), int(right_y))
+
+            # Draw distance label
+            distance = np.sqrt((opt_x - curr_x)**2 + (opt_y - curr_y)**2) / (10 * self.scale_factor)
+            if distance > 1:  # Only show if movement > 1cm
+                mid_x = (curr_x + opt_x) // 2
+                mid_y = (curr_y + opt_y) // 2
+
+                label = f"{distance:.1f}cm"
+                font = QFont()
+                font.setPointSize(8)
+                font.setBold(True)
+                painter.setFont(font)
+
+                # Label background
+                metrics = painter.fontMetrics()
+                label_width = metrics.horizontalAdvance(label) + 6
+                label_height = metrics.height() + 2
+                painter.fillRect(mid_x - label_width//2, mid_y - label_height//2,
+                               label_width, label_height, QColor(255, 255, 255, 200))
+
+                # Label text
+                painter.setPen(QPen(QColor(255, 100, 0), 1))
+                painter.drawText(mid_x - label_width//2 + 3, mid_y + label_height//2 - 2, label)
+
     def paintEvent(self, event):
         """Draw the image and overlays"""
         if not self.pixmap:
@@ -161,17 +361,18 @@ class ImageWidget(QWidget):
                     x2, y2 = int(self.desk_corners[next_i][0] * self.scale_factor), int(self.desk_corners[next_i][1] * self.scale_factor)
                     painter.drawLine(x1, y1, x2, y2)
         
-        # Draw detected items
+        # Draw visual overlays (if enabled)
+        if self.show_overlay and self.mode == 'view':
+            self.draw_ergonomic_overlays(painter)
+
+        # Draw detected items with enhanced bounding boxes
         if self.detected_items:
-            pen = QPen(QColor(0, 0, 255), 2)
-            painter.setPen(pen)
             for item in self.detected_items:
-                x = int(item['x'] * self.scale_factor)
-                y = int(item['y'] * self.scale_factor)
-                w = int(item['width'] * self.scale_factor)
-                h = int(item['height'] * self.scale_factor)
-                painter.drawRect(x-w//2, y-h//2, w, h)
-                painter.drawText(x-w//2, y-h//2-5, item['slug'])
+                self.draw_item_bbox(painter, item)
+
+        # Draw recommendation arrows
+        if self.show_overlay and self.recommendations:
+            self.draw_recommendation_arrows(painter)
     
     def update_image_scaling(self):
         """Update image scaling to fit available space"""
@@ -220,6 +421,10 @@ class DeskOptMainWindow(QMainWindow):
         # Worker thread for background analysis
         self.analysis_worker = None
         self.is_analyzing = False
+
+        # Manual item corrections
+        self.detected_items_data = []  # Store full item data for editing
+        self.manual_corrections = {}   # Track user edits {row: {field: value}}
 
         self.init_ui()
         
@@ -331,7 +536,15 @@ class DeskOptMainWindow(QMainWindow):
         analyze_btn = QPushButton("Analyze Setup")
         analyze_btn.clicked.connect(self.analyze_setup)
         layout.addWidget(analyze_btn)
-        
+
+        # Visual overlay toggle
+        self.overlay_checkbox = QCheckBox("Show Visual Overlays")
+        self.overlay_checkbox.setChecked(True)
+        self.overlay_checkbox.stateChanged.connect(
+            lambda state: self.image_widget.toggle_overlay(state == Qt.CheckState.Checked.value)
+        )
+        layout.addWidget(self.overlay_checkbox)
+
         layout.addStretch()
         return panel
     
@@ -344,24 +557,73 @@ class DeskOptMainWindow(QMainWindow):
         # Tab widget for different results
         self.results_tabs = QTabWidget()
         
-        # Detected items tab
+        # Detected items tab with manual correction
+        items_widget = QWidget()
+        items_layout = QVBoxLayout(items_widget)
+
+        # Items table
         self.items_table = QTableWidget()
-        self.items_table.setColumnCount(4)
-        self.items_table.setHorizontalHeaderLabels(["Item", "Position", "Confidence", "Action"])
-        self.results_tabs.addTab(self.items_table, "Detected Items")
+        self.items_table.setColumnCount(5)
+        self.items_table.setHorizontalHeaderLabels(["Type", "Position", "Confidence", "Status", "Action"])
+        self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.items_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        items_layout.addWidget(self.items_table)
+
+        # Correction buttons
+        correction_layout = QHBoxLayout()
+
+        add_item_btn = QPushButton("Add Item")
+        add_item_btn.clicked.connect(self.add_manual_item)
+        correction_layout.addWidget(add_item_btn)
+
+        reanalyze_btn = QPushButton("Re-analyze with Corrections")
+        reanalyze_btn.clicked.connect(self.reanalyze_with_corrections)
+        correction_layout.addWidget(reanalyze_btn)
+
+        items_layout.addLayout(correction_layout)
+
+        self.results_tabs.addTab(items_widget, "Detected Items")
         
         # Recommendations tab
         self.recommendations_text = QTextEdit()
         self.recommendations_text.setReadOnly(True)
         self.results_tabs.addTab(self.recommendations_text, "Recommendations")
         
-        # Score tab
-        self.score_label = QLabel("Ergonomic Score: --")
-        self.score_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        # Score tab with detailed breakdown
         score_widget = QWidget()
         score_layout = QVBoxLayout(score_widget)
+
+        # Main score display
+        self.score_label = QLabel("Ergonomic Score: --")
+        self.score_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        self.score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         score_layout.addWidget(self.score_label)
-        score_layout.addStretch()
+
+        # Score progress bar
+        self.score_progress = QProgressBar()
+        self.score_progress.setMaximum(100)
+        self.score_progress.setMinimum(0)
+        self.score_progress.setValue(0)
+        self.score_progress.setTextVisible(True)
+        self.score_progress.setFormat("%v/100")
+        self.score_progress.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid grey;
+                border-radius: 5px;
+                text-align: center;
+                height: 30px;
+            }
+            QProgressBar::chunk {
+                background-color: #05B8CC;
+            }
+        """)
+        score_layout.addWidget(self.score_progress)
+
+        # Detailed breakdown text
+        self.score_breakdown_text = QTextEdit()
+        self.score_breakdown_text.setReadOnly(True)
+        score_layout.addWidget(self.score_breakdown_text)
+
         self.results_tabs.addTab(score_widget, "Score")
         
         layout.addWidget(self.results_tabs)
@@ -719,29 +981,396 @@ class DeskOptMainWindow(QMainWindow):
     
     def display_results(self, items, analysis):
         """Display analysis results"""
-        # Update items table
+        # Store items data for editing
+        self.detected_items_data = items.copy()
+        self.manual_corrections = {}
+
+        # Update items table with editable controls
         self.items_table.setRowCount(len(items))
+
+        # Available item types from Config
+        item_types = [
+            'laptop', 'mouse', 'keyboard', 'monitor', 'phone',
+            'notebook', 'cup', 'bottle', 'chair', 'clock'
+        ]
+
         for i, item in enumerate(items):
-            self.items_table.setItem(i, 0, QTableWidgetItem(item['item_slug']))
-            self.items_table.setItem(i, 1, QTableWidgetItem(f"({item['x_pos']:.1f}, {item['y_pos']:.1f})"))
-            self.items_table.setItem(i, 2, QTableWidgetItem(f"{item['confidence']:.2f}"))
-            self.items_table.setItem(i, 3, QTableWidgetItem("Keep"))
+            # Column 0: Item Type (dropdown)
+            type_combo = QComboBox()
+            type_combo.addItems(item_types)
+            type_combo.setCurrentText(item['item_slug'])
+            type_combo.currentTextChanged.connect(
+                lambda text, row=i: self.on_item_type_changed(row, text)
+            )
+            self.items_table.setCellWidget(i, 0, type_combo)
+
+            # Column 1: Position (editable)
+            pos_item = QTableWidgetItem(f"({item['x_pos']:.1f}, {item['y_pos']:.1f})")
+            self.items_table.setItem(i, 1, pos_item)
+
+            # Column 2: Confidence (read-only)
+            conf_item = QTableWidgetItem(f"{item['confidence']:.2f}")
+            conf_item.setFlags(conf_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(i, 2, conf_item)
+
+            # Column 3: Status (read-only indicator)
+            status_item = QTableWidgetItem("Detected")
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(i, 3, status_item)
+
+            # Column 4: Action (delete button)
+            delete_btn = QPushButton("Delete")
+            delete_btn.clicked.connect(lambda checked, row=i: self.delete_item(row))
+            self.items_table.setCellWidget(i, 4, delete_btn)
         
-        # Update recommendations
+        # Update recommendations with violation details
         recommendations_text = ""
+
+        # Add violation summary
+        violations = analysis.get('violations', [])
+        if violations:
+            # Group violations by priority
+            p1_violations = [v for v in violations if v['priority'] == 1]
+            p2_violations = [v for v in violations if v['priority'] == 2]
+            p3_violations = [v for v in violations if v['priority'] == 3]
+
+            recommendations_text += "=== ERGONOMIC VIOLATIONS ===\n\n"
+
+            if p1_violations:
+                recommendations_text += f"🔴 High Priority ({len(p1_violations)}):\n"
+                for v in p1_violations:
+                    recommendations_text += f"  • {v['item']}: {v['advice']}\n"
+                recommendations_text += "\n"
+
+            if p2_violations:
+                recommendations_text += f"🟡 Medium Priority ({len(p2_violations)}):\n"
+                for v in p2_violations:
+                    recommendations_text += f"  • {v['item']}: {v['advice']}\n"
+                recommendations_text += "\n"
+
+            if p3_violations:
+                recommendations_text += f"🟢 Low Priority ({len(p3_violations)}):\n"
+                for v in p3_violations:
+                    recommendations_text += f"  • {v['item']}: {v['advice']}\n"
+                recommendations_text += "\n"
+
+            recommendations_text += "=== RECOMMENDED POSITIONS ===\n\n"
+
+        # Add detailed recommendations
         for rec in analysis['recommendations']:
             recommendations_text += f"• {rec['item']}: {rec['advice']}\n"
             recommendations_text += f"  Move from ({rec['current_pos'][0]:.1f}, {rec['current_pos'][1]:.1f}) "
             recommendations_text += f"to ({rec['optimal_pos'][0]:.1f}, {rec['optimal_pos'][1]:.1f})\n\n"
-        
+
         self.recommendations_text.setPlainText(recommendations_text or "No recommendations - Great setup!")
-        
+
         # Update score
-        self.score_label.setText(f"Ergonomic Score: {analysis['score']}/100")
-        
+        score = analysis['score']
+        self.score_label.setText(f"Ergonomic Score: {score:.1f}/100")
+
+        # Update progress bar
+        self.score_progress.setValue(int(score))
+
         # Color code the score
-        color = Config.get_score_color(analysis['score'])
+        color = Config.get_score_color(score)
         self.score_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
+
+        # Update progress bar color based on score
+        if score >= 80:
+            bar_color = "#00AA00"  # Green
+        elif score >= 60:
+            bar_color = "#FFA500"  # Orange
+        else:
+            bar_color = "#FF0000"  # Red
+
+        self.score_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 2px solid grey;
+                border-radius: 5px;
+                text-align: center;
+                height: 30px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {bar_color};
+            }}
+        """)
+
+        # Generate detailed score breakdown
+        self.update_score_breakdown(analysis)
+
+        # Update visual overlays on image
+        self.image_widget.set_recommendations(analysis.get('recommendations', []))
+        self.image_widget.set_mode('view')  # Enable overlay display mode
+
+    def update_score_breakdown(self, analysis):
+        """Generate and display detailed score breakdown"""
+        breakdown_text = ""
+
+        score = analysis['score']
+        violations = analysis.get('violations', [])
+
+        # Score interpretation
+        breakdown_text += "=== SCORE INTERPRETATION ===\n\n"
+        if score >= 80:
+            breakdown_text += "🟢 EXCELLENT (80-100): Your workspace setup is ergonomically sound!\n"
+            breakdown_text += "Minor adjustments may provide marginal improvements.\n\n"
+        elif score >= 60:
+            breakdown_text += "🟡 GOOD (60-79): Your workspace is decent but has room for improvement.\n"
+            breakdown_text += "Address the issues below to reduce discomfort and strain.\n\n"
+        elif score >= 40:
+            breakdown_text += "🟠 FAIR (40-59): Your workspace has significant ergonomic issues.\n"
+            breakdown_text += "Making these changes will notably improve your comfort.\n\n"
+        else:
+            breakdown_text += "🔴 POOR (0-39): Your workspace has critical ergonomic problems.\n"
+            breakdown_text += "Immediate changes are recommended to prevent injury.\n\n"
+
+        # Penalty breakdown by priority
+        breakdown_text += "=== PENALTY BREAKDOWN ===\n\n"
+
+        if violations:
+            p1_violations = [v for v in violations if v['priority'] == 1]
+            p2_violations = [v for v in violations if v['priority'] == 2]
+            p3_violations = [v for v in violations if v['priority'] == 3]
+
+            total_penalty = 100 - score
+
+            if p1_violations:
+                breakdown_text += f"🔴 High Priority Issues ({len(p1_violations)}):\n"
+                breakdown_text += "  Critical ergonomic problems requiring immediate attention\n"
+                for v in p1_violations:
+                    breakdown_text += f"  • {v['item']}\n"
+                breakdown_text += "\n"
+
+            if p2_violations:
+                breakdown_text += f"🟡 Medium Priority Issues ({len(p2_violations)}):\n"
+                breakdown_text += "  Important improvements for better ergonomics\n"
+                for v in p2_violations:
+                    breakdown_text += f"  • {v['item']}\n"
+                breakdown_text += "\n"
+
+            if p3_violations:
+                breakdown_text += f"🟢 Low Priority Issues ({len(p3_violations)}):\n"
+                breakdown_text += "  Minor optimizations for best comfort\n"
+                for v in p3_violations:
+                    breakdown_text += f"  • {v['item']}\n"
+                breakdown_text += "\n"
+
+            breakdown_text += f"Total Penalty: -{total_penalty:.1f} points\n"
+            breakdown_text += f"Base Score: 100 points\n"
+            breakdown_text += f"Final Score: {score:.1f}/100\n\n"
+
+        else:
+            breakdown_text += "No violations detected! Your setup is optimal.\n\n"
+
+        # Improvement potential
+        breakdown_text += "=== IMPROVEMENT POTENTIAL ===\n\n"
+
+        recommendations = analysis.get('recommendations', [])
+        if recommendations:
+            # Estimate score improvement for each fix
+            breakdown_text += "Potential score gains by fixing issues:\n\n"
+
+            for i, rec in enumerate(recommendations[:5], 1):  # Show top 5
+                # Estimate improvement based on priority
+                item_penalty = 0
+                for v in violations:
+                    if v['item'] == rec['item']:
+                        if v['priority'] == 1:
+                            item_penalty = 20
+                        elif v['priority'] == 2:
+                            item_penalty = 10
+                        else:
+                            item_penalty = 5
+                        break
+
+                breakdown_text += f"{i}. Fix {rec['item']}: +{item_penalty} points\n"
+                breakdown_text += f"   {rec['advice']}\n\n"
+
+            if len(recommendations) > 5:
+                breakdown_text += f"...and {len(recommendations) - 5} more improvements\n\n"
+
+            max_improvement = min(100, score + sum([20 if v['priority']==1 else 10 if v['priority']==2 else 5 for v in violations]))
+            breakdown_text += f"Maximum Achievable Score: {max_improvement:.1f}/100\n"
+            if max_improvement >= 80:
+                breakdown_text += "(Excellent ergonomic setup)\n"
+        else:
+            breakdown_text += "Your setup is already optimal! No improvements needed.\n"
+
+        self.score_breakdown_text.setPlainText(breakdown_text)
+
+    def on_item_type_changed(self, row, new_type):
+        """Handle item type change"""
+        if row < len(self.detected_items_data):
+            self.detected_items_data[row]['item_slug'] = new_type
+            # Update status to show it was modified
+            status_item = self.items_table.item(row, 3)
+            if status_item:
+                status_item.setText("Modified")
+                status_item.setForeground(QColor("#FFA500"))  # Orange
+
+    def delete_item(self, row):
+        """Mark item for deletion"""
+        if row < self.items_table.rowCount():
+            # Mark status as deleted
+            status_item = self.items_table.item(row, 3)
+            if status_item:
+                status_item.setText("Deleted")
+                status_item.setForeground(QColor("#FF0000"))  # Red
+
+            # Disable the row visually
+            for col in range(self.items_table.columnCount()):
+                widget = self.items_table.cellWidget(row, col)
+                if widget:
+                    widget.setEnabled(False)
+                item = self.items_table.item(row, col)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+
+    def add_manual_item(self):
+        """Add a manual item to the detection list"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QDoubleSpinBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Manual Item")
+        layout = QVBoxLayout(dialog)
+
+        # Item type selection
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Item Type:"))
+        type_combo = QComboBox()
+        type_combo.addItems([
+            'laptop', 'mouse', 'keyboard', 'monitor', 'phone',
+            'notebook', 'cup', 'bottle', 'chair', 'clock'
+        ])
+        type_layout.addWidget(type_combo)
+        layout.addLayout(type_layout)
+
+        # X position
+        x_layout = QHBoxLayout()
+        x_layout.addWidget(QLabel("X Position (cm):"))
+        x_spin = QDoubleSpinBox()
+        x_spin.setRange(0, 200)
+        x_spin.setValue(50)
+        x_spin.setDecimals(1)
+        x_layout.addWidget(x_spin)
+        layout.addLayout(x_layout)
+
+        # Y position
+        y_layout = QHBoxLayout()
+        y_layout.addWidget(QLabel("Y Position (cm):"))
+        y_spin = QDoubleSpinBox()
+        y_spin.setRange(0, 200)
+        y_spin.setValue(30)
+        y_spin.setDecimals(1)
+        y_layout.addWidget(y_spin)
+        layout.addLayout(y_layout)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("Add")
+        cancel_btn = QPushButton("Cancel")
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Add new item to detected items
+            new_item = {
+                'item_slug': type_combo.currentText(),
+                'x_pos': x_spin.value(),
+                'y_pos': y_spin.value(),
+                'confidence': 1.0,  # Manual items have 100% confidence
+                'bbox': [0, 0, 100, 100]  # Placeholder bbox
+            }
+            self.detected_items_data.append(new_item)
+
+            # Add row to table
+            row = self.items_table.rowCount()
+            self.items_table.insertRow(row)
+
+            # Add widgets to new row
+            type_combo_widget = QComboBox()
+            type_combo_widget.addItems([
+                'laptop', 'mouse', 'keyboard', 'monitor', 'phone',
+                'notebook', 'cup', 'bottle', 'chair', 'clock'
+            ])
+            type_combo_widget.setCurrentText(new_item['item_slug'])
+            type_combo_widget.currentTextChanged.connect(
+                lambda text, r=row: self.on_item_type_changed(r, text)
+            )
+            self.items_table.setCellWidget(row, 0, type_combo_widget)
+
+            self.items_table.setItem(row, 1, QTableWidgetItem(f"({new_item['x_pos']:.1f}, {new_item['y_pos']:.1f})"))
+
+            conf_item = QTableWidgetItem(f"{new_item['confidence']:.2f}")
+            conf_item.setFlags(conf_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(row, 2, conf_item)
+
+            status_item = QTableWidgetItem("Manual")
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            status_item.setForeground(QColor("#00AA00"))  # Green
+            self.items_table.setItem(row, 3, status_item)
+
+            delete_btn = QPushButton("Delete")
+            delete_btn.clicked.connect(lambda checked, r=row: self.delete_item(r))
+            self.items_table.setCellWidget(row, 4, delete_btn)
+
+            logger.info(f"Manual item added: {new_item['item_slug']} at ({new_item['x_pos']}, {new_item['y_pos']})")
+
+    def reanalyze_with_corrections(self):
+        """Re-run ergonomic analysis with manual corrections"""
+        if not self.detected_items_data:
+            QMessageBox.warning(self, "No Data", "No items to analyze. Please run detection first.")
+            return
+
+        # Filter out deleted items
+        corrected_items = []
+        for i, item in enumerate(self.detected_items_data):
+            if i < self.items_table.rowCount():
+                status_item = self.items_table.item(i, 3)
+                if status_item and status_item.text() != "Deleted":
+                    corrected_items.append(item)
+
+        if not corrected_items:
+            QMessageBox.warning(self, "No Items", "All items were deleted. Cannot analyze.")
+            return
+
+        try:
+            # Re-run ergonomic analysis with corrected items
+            logger.info(f"Re-analyzing with {len(corrected_items)} corrected items")
+
+            analysis = self.ergonomic_engine.analyze_workspace(
+                corrected_items,
+                self.calibration.get_desk_dimensions()
+            )
+
+            # Update display with new analysis
+            self.display_results(corrected_items, analysis)
+
+            # Save corrected items to database
+            if self.current_scan_id:
+                for item in corrected_items:
+                    self.db.add_detected_item(
+                        self.current_scan_id,
+                        item['item_slug'],
+                        item['x_pos'],
+                        item['y_pos'],
+                        item['confidence']
+                    )
+
+            QMessageBox.information(
+                self,
+                "Analysis Complete",
+                f"Re-analysis completed with manual corrections!\nNew Score: {analysis['score']}/100"
+            )
+            logger.info(f"Re-analysis complete. New score: {analysis['score']}/100")
+
+        except Exception as e:
+            logger.error(f"Re-analysis failed: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Re-analysis failed: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)

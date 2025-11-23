@@ -75,10 +75,13 @@ class CalibrationManager:
             # Check for perspective distortion
             scale_diff = abs(scale_x - scale_y) / max(scale_x, scale_y)
             if scale_diff > Config.MAX_PERSPECTIVE_DISTORTION:
-                logger.warning(
-                    f"Significant perspective distortion detected (>{Config.MAX_PERSPECTIVE_DISTORTION*100}%): "
-                    f"X={scale_x:.2f}, Y={scale_y:.2f}"
+                error_msg = (
+                    f"Perspective distortion too high ({scale_diff*100:.1f}% > {Config.MAX_PERSPECTIVE_DISTORTION*100}%). "
+                    f"Please take a photo from directly above the credit card. "
+                    f"Current scales: X={scale_x:.2f}, Y={scale_y:.2f} pixels/cm"
                 )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
 
             # Use average scale factor
             self.scale_factor = (scale_x + scale_y) / 2
