@@ -589,13 +589,41 @@ class DeskOptMainWindow(QMainWindow):
         self.recommendations_text.setReadOnly(True)
         self.results_tabs.addTab(self.recommendations_text, "Recommendations")
         
-        # Score tab
-        self.score_label = QLabel("Ergonomic Score: --")
-        self.score_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        # Score tab with detailed breakdown
         score_widget = QWidget()
         score_layout = QVBoxLayout(score_widget)
+
+        # Main score display
+        self.score_label = QLabel("Ergonomic Score: --")
+        self.score_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        self.score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         score_layout.addWidget(self.score_label)
-        score_layout.addStretch()
+
+        # Score progress bar
+        self.score_progress = QProgressBar()
+        self.score_progress.setMaximum(100)
+        self.score_progress.setMinimum(0)
+        self.score_progress.setValue(0)
+        self.score_progress.setTextVisible(True)
+        self.score_progress.setFormat("%v/100")
+        self.score_progress.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid grey;
+                border-radius: 5px;
+                text-align: center;
+                height: 30px;
+            }
+            QProgressBar::chunk {
+                background-color: #05B8CC;
+            }
+        """)
+        score_layout.addWidget(self.score_progress)
+
+        # Detailed breakdown text
+        self.score_breakdown_text = QTextEdit()
+        self.score_breakdown_text.setReadOnly(True)
+        score_layout.addWidget(self.score_breakdown_text)
+
         self.results_tabs.addTab(score_widget, "Score")
         
         layout.addWidget(self.results_tabs)
@@ -1037,15 +1065,138 @@ class DeskOptMainWindow(QMainWindow):
         self.recommendations_text.setPlainText(recommendations_text or "No recommendations - Great setup!")
 
         # Update score
-        self.score_label.setText(f"Ergonomic Score: {analysis['score']}/100")
+        score = analysis['score']
+        self.score_label.setText(f"Ergonomic Score: {score:.1f}/100")
+
+        # Update progress bar
+        self.score_progress.setValue(int(score))
 
         # Color code the score
-        color = Config.get_score_color(analysis['score'])
+        color = Config.get_score_color(score)
         self.score_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
+
+        # Update progress bar color based on score
+        if score >= 80:
+            bar_color = "#00AA00"  # Green
+        elif score >= 60:
+            bar_color = "#FFA500"  # Orange
+        else:
+            bar_color = "#FF0000"  # Red
+
+        self.score_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 2px solid grey;
+                border-radius: 5px;
+                text-align: center;
+                height: 30px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {bar_color};
+            }}
+        """)
+
+        # Generate detailed score breakdown
+        self.update_score_breakdown(analysis)
 
         # Update visual overlays on image
         self.image_widget.set_recommendations(analysis.get('recommendations', []))
         self.image_widget.set_mode('view')  # Enable overlay display mode
+
+    def update_score_breakdown(self, analysis):
+        """Generate and display detailed score breakdown"""
+        breakdown_text = ""
+
+        score = analysis['score']
+        violations = analysis.get('violations', [])
+
+        # Score interpretation
+        breakdown_text += "=== SCORE INTERPRETATION ===\n\n"
+        if score >= 80:
+            breakdown_text += "🟢 EXCELLENT (80-100): Your workspace setup is ergonomically sound!\n"
+            breakdown_text += "Minor adjustments may provide marginal improvements.\n\n"
+        elif score >= 60:
+            breakdown_text += "🟡 GOOD (60-79): Your workspace is decent but has room for improvement.\n"
+            breakdown_text += "Address the issues below to reduce discomfort and strain.\n\n"
+        elif score >= 40:
+            breakdown_text += "🟠 FAIR (40-59): Your workspace has significant ergonomic issues.\n"
+            breakdown_text += "Making these changes will notably improve your comfort.\n\n"
+        else:
+            breakdown_text += "🔴 POOR (0-39): Your workspace has critical ergonomic problems.\n"
+            breakdown_text += "Immediate changes are recommended to prevent injury.\n\n"
+
+        # Penalty breakdown by priority
+        breakdown_text += "=== PENALTY BREAKDOWN ===\n\n"
+
+        if violations:
+            p1_violations = [v for v in violations if v['priority'] == 1]
+            p2_violations = [v for v in violations if v['priority'] == 2]
+            p3_violations = [v for v in violations if v['priority'] == 3]
+
+            total_penalty = 100 - score
+
+            if p1_violations:
+                breakdown_text += f"🔴 High Priority Issues ({len(p1_violations)}):\n"
+                breakdown_text += "  Critical ergonomic problems requiring immediate attention\n"
+                for v in p1_violations:
+                    breakdown_text += f"  • {v['item']}\n"
+                breakdown_text += "\n"
+
+            if p2_violations:
+                breakdown_text += f"🟡 Medium Priority Issues ({len(p2_violations)}):\n"
+                breakdown_text += "  Important improvements for better ergonomics\n"
+                for v in p2_violations:
+                    breakdown_text += f"  • {v['item']}\n"
+                breakdown_text += "\n"
+
+            if p3_violations:
+                breakdown_text += f"🟢 Low Priority Issues ({len(p3_violations)}):\n"
+                breakdown_text += "  Minor optimizations for best comfort\n"
+                for v in p3_violations:
+                    breakdown_text += f"  • {v['item']}\n"
+                breakdown_text += "\n"
+
+            breakdown_text += f"Total Penalty: -{total_penalty:.1f} points\n"
+            breakdown_text += f"Base Score: 100 points\n"
+            breakdown_text += f"Final Score: {score:.1f}/100\n\n"
+
+        else:
+            breakdown_text += "No violations detected! Your setup is optimal.\n\n"
+
+        # Improvement potential
+        breakdown_text += "=== IMPROVEMENT POTENTIAL ===\n\n"
+
+        recommendations = analysis.get('recommendations', [])
+        if recommendations:
+            # Estimate score improvement for each fix
+            breakdown_text += "Potential score gains by fixing issues:\n\n"
+
+            for i, rec in enumerate(recommendations[:5], 1):  # Show top 5
+                # Estimate improvement based on priority
+                item_penalty = 0
+                for v in violations:
+                    if v['item'] == rec['item']:
+                        if v['priority'] == 1:
+                            item_penalty = 20
+                        elif v['priority'] == 2:
+                            item_penalty = 10
+                        else:
+                            item_penalty = 5
+                        break
+
+                breakdown_text += f"{i}. Fix {rec['item']}: +{item_penalty} points\n"
+                breakdown_text += f"   {rec['advice']}\n\n"
+
+            if len(recommendations) > 5:
+                breakdown_text += f"...and {len(recommendations) - 5} more improvements\n\n"
+
+            max_improvement = min(100, score + sum([20 if v['priority']==1 else 10 if v['priority']==2 else 5 for v in violations]))
+            breakdown_text += f"Maximum Achievable Score: {max_improvement:.1f}/100\n"
+            if max_improvement >= 80:
+                breakdown_text += "(Excellent ergonomic setup)\n"
+        else:
+            breakdown_text += "Your setup is already optimal! No improvements needed.\n"
+
+        self.score_breakdown_text.setPlainText(breakdown_text)
 
     def on_item_type_changed(self, row, new_type):
         """Handle item type change"""
