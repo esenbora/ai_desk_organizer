@@ -2,7 +2,8 @@ import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QPushButton, QComboBox,
                             QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
-                            QTabWidget, QTextEdit, QSplitter, QFrame, QProgressBar)
+                            QTabWidget, QTextEdit, QSplitter, QFrame, QProgressBar,
+                            QHeaderView, QAbstractItemView)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QFont, QColor, QImage
 import cv2
@@ -221,6 +222,10 @@ class DeskOptMainWindow(QMainWindow):
         self.analysis_worker = None
         self.is_analyzing = False
 
+        # Manual item corrections
+        self.detected_items_data = []  # Store full item data for editing
+        self.manual_corrections = {}   # Track user edits {row: {field: value}}
+
         self.init_ui()
         
     def init_ui(self):
@@ -344,11 +349,32 @@ class DeskOptMainWindow(QMainWindow):
         # Tab widget for different results
         self.results_tabs = QTabWidget()
         
-        # Detected items tab
+        # Detected items tab with manual correction
+        items_widget = QWidget()
+        items_layout = QVBoxLayout(items_widget)
+
+        # Items table
         self.items_table = QTableWidget()
-        self.items_table.setColumnCount(4)
-        self.items_table.setHorizontalHeaderLabels(["Item", "Position", "Confidence", "Action"])
-        self.results_tabs.addTab(self.items_table, "Detected Items")
+        self.items_table.setColumnCount(5)
+        self.items_table.setHorizontalHeaderLabels(["Type", "Position", "Confidence", "Status", "Action"])
+        self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.items_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        items_layout.addWidget(self.items_table)
+
+        # Correction buttons
+        correction_layout = QHBoxLayout()
+
+        add_item_btn = QPushButton("Add Item")
+        add_item_btn.clicked.connect(self.add_manual_item)
+        correction_layout.addWidget(add_item_btn)
+
+        reanalyze_btn = QPushButton("Re-analyze with Corrections")
+        reanalyze_btn.clicked.connect(self.reanalyze_with_corrections)
+        correction_layout.addWidget(reanalyze_btn)
+
+        items_layout.addLayout(correction_layout)
+
+        self.results_tabs.addTab(items_widget, "Detected Items")
         
         # Recommendations tab
         self.recommendations_text = QTextEdit()
@@ -719,13 +745,47 @@ class DeskOptMainWindow(QMainWindow):
     
     def display_results(self, items, analysis):
         """Display analysis results"""
-        # Update items table
+        # Store items data for editing
+        self.detected_items_data = items.copy()
+        self.manual_corrections = {}
+
+        # Update items table with editable controls
         self.items_table.setRowCount(len(items))
+
+        # Available item types from Config
+        item_types = [
+            'laptop', 'mouse', 'keyboard', 'monitor', 'phone',
+            'notebook', 'cup', 'bottle', 'chair', 'clock'
+        ]
+
         for i, item in enumerate(items):
-            self.items_table.setItem(i, 0, QTableWidgetItem(item['item_slug']))
-            self.items_table.setItem(i, 1, QTableWidgetItem(f"({item['x_pos']:.1f}, {item['y_pos']:.1f})"))
-            self.items_table.setItem(i, 2, QTableWidgetItem(f"{item['confidence']:.2f}"))
-            self.items_table.setItem(i, 3, QTableWidgetItem("Keep"))
+            # Column 0: Item Type (dropdown)
+            type_combo = QComboBox()
+            type_combo.addItems(item_types)
+            type_combo.setCurrentText(item['item_slug'])
+            type_combo.currentTextChanged.connect(
+                lambda text, row=i: self.on_item_type_changed(row, text)
+            )
+            self.items_table.setCellWidget(i, 0, type_combo)
+
+            # Column 1: Position (editable)
+            pos_item = QTableWidgetItem(f"({item['x_pos']:.1f}, {item['y_pos']:.1f})")
+            self.items_table.setItem(i, 1, pos_item)
+
+            # Column 2: Confidence (read-only)
+            conf_item = QTableWidgetItem(f"{item['confidence']:.2f}")
+            conf_item.setFlags(conf_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(i, 2, conf_item)
+
+            # Column 3: Status (read-only indicator)
+            status_item = QTableWidgetItem("Detected")
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(i, 3, status_item)
+
+            # Column 4: Action (delete button)
+            delete_btn = QPushButton("Delete")
+            delete_btn.clicked.connect(lambda checked, row=i: self.delete_item(row))
+            self.items_table.setCellWidget(i, 4, delete_btn)
         
         # Update recommendations with violation details
         recommendations_text = ""
@@ -774,6 +834,180 @@ class DeskOptMainWindow(QMainWindow):
         # Color code the score
         color = Config.get_score_color(analysis['score'])
         self.score_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
+
+    def on_item_type_changed(self, row, new_type):
+        """Handle item type change"""
+        if row < len(self.detected_items_data):
+            self.detected_items_data[row]['item_slug'] = new_type
+            # Update status to show it was modified
+            status_item = self.items_table.item(row, 3)
+            if status_item:
+                status_item.setText("Modified")
+                status_item.setForeground(QColor("#FFA500"))  # Orange
+
+    def delete_item(self, row):
+        """Mark item for deletion"""
+        if row < self.items_table.rowCount():
+            # Mark status as deleted
+            status_item = self.items_table.item(row, 3)
+            if status_item:
+                status_item.setText("Deleted")
+                status_item.setForeground(QColor("#FF0000"))  # Red
+
+            # Disable the row visually
+            for col in range(self.items_table.columnCount()):
+                widget = self.items_table.cellWidget(row, col)
+                if widget:
+                    widget.setEnabled(False)
+                item = self.items_table.item(row, col)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+
+    def add_manual_item(self):
+        """Add a manual item to the detection list"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QDoubleSpinBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Manual Item")
+        layout = QVBoxLayout(dialog)
+
+        # Item type selection
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Item Type:"))
+        type_combo = QComboBox()
+        type_combo.addItems([
+            'laptop', 'mouse', 'keyboard', 'monitor', 'phone',
+            'notebook', 'cup', 'bottle', 'chair', 'clock'
+        ])
+        type_layout.addWidget(type_combo)
+        layout.addLayout(type_layout)
+
+        # X position
+        x_layout = QHBoxLayout()
+        x_layout.addWidget(QLabel("X Position (cm):"))
+        x_spin = QDoubleSpinBox()
+        x_spin.setRange(0, 200)
+        x_spin.setValue(50)
+        x_spin.setDecimals(1)
+        x_layout.addWidget(x_spin)
+        layout.addLayout(x_layout)
+
+        # Y position
+        y_layout = QHBoxLayout()
+        y_layout.addWidget(QLabel("Y Position (cm):"))
+        y_spin = QDoubleSpinBox()
+        y_spin.setRange(0, 200)
+        y_spin.setValue(30)
+        y_spin.setDecimals(1)
+        y_layout.addWidget(y_spin)
+        layout.addLayout(y_layout)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("Add")
+        cancel_btn = QPushButton("Cancel")
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Add new item to detected items
+            new_item = {
+                'item_slug': type_combo.currentText(),
+                'x_pos': x_spin.value(),
+                'y_pos': y_spin.value(),
+                'confidence': 1.0,  # Manual items have 100% confidence
+                'bbox': [0, 0, 100, 100]  # Placeholder bbox
+            }
+            self.detected_items_data.append(new_item)
+
+            # Add row to table
+            row = self.items_table.rowCount()
+            self.items_table.insertRow(row)
+
+            # Add widgets to new row
+            type_combo_widget = QComboBox()
+            type_combo_widget.addItems([
+                'laptop', 'mouse', 'keyboard', 'monitor', 'phone',
+                'notebook', 'cup', 'bottle', 'chair', 'clock'
+            ])
+            type_combo_widget.setCurrentText(new_item['item_slug'])
+            type_combo_widget.currentTextChanged.connect(
+                lambda text, r=row: self.on_item_type_changed(r, text)
+            )
+            self.items_table.setCellWidget(row, 0, type_combo_widget)
+
+            self.items_table.setItem(row, 1, QTableWidgetItem(f"({new_item['x_pos']:.1f}, {new_item['y_pos']:.1f})"))
+
+            conf_item = QTableWidgetItem(f"{new_item['confidence']:.2f}")
+            conf_item.setFlags(conf_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(row, 2, conf_item)
+
+            status_item = QTableWidgetItem("Manual")
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            status_item.setForeground(QColor("#00AA00"))  # Green
+            self.items_table.setItem(row, 3, status_item)
+
+            delete_btn = QPushButton("Delete")
+            delete_btn.clicked.connect(lambda checked, r=row: self.delete_item(r))
+            self.items_table.setCellWidget(row, 4, delete_btn)
+
+            logger.info(f"Manual item added: {new_item['item_slug']} at ({new_item['x_pos']}, {new_item['y_pos']})")
+
+    def reanalyze_with_corrections(self):
+        """Re-run ergonomic analysis with manual corrections"""
+        if not self.detected_items_data:
+            QMessageBox.warning(self, "No Data", "No items to analyze. Please run detection first.")
+            return
+
+        # Filter out deleted items
+        corrected_items = []
+        for i, item in enumerate(self.detected_items_data):
+            if i < self.items_table.rowCount():
+                status_item = self.items_table.item(i, 3)
+                if status_item and status_item.text() != "Deleted":
+                    corrected_items.append(item)
+
+        if not corrected_items:
+            QMessageBox.warning(self, "No Items", "All items were deleted. Cannot analyze.")
+            return
+
+        try:
+            # Re-run ergonomic analysis with corrected items
+            logger.info(f"Re-analyzing with {len(corrected_items)} corrected items")
+
+            analysis = self.ergonomic_engine.analyze_workspace(
+                corrected_items,
+                self.calibration.get_desk_dimensions()
+            )
+
+            # Update display with new analysis
+            self.display_results(corrected_items, analysis)
+
+            # Save corrected items to database
+            if self.current_scan_id:
+                for item in corrected_items:
+                    self.db.add_detected_item(
+                        self.current_scan_id,
+                        item['item_slug'],
+                        item['x_pos'],
+                        item['y_pos'],
+                        item['confidence']
+                    )
+
+            QMessageBox.information(
+                self,
+                "Analysis Complete",
+                f"Re-analysis completed with manual corrections!\nNew Score: {analysis['score']}/100"
+            )
+            logger.info(f"Re-analysis complete. New score: {analysis['score']}/100")
+
+        except Exception as e:
+            logger.error(f"Re-analysis failed: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Re-analysis failed: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
